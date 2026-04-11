@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -44,20 +46,12 @@ CREATE TABLE IF NOT EXISTS findings (
   resource_arn TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL,
   detail_json TEXT NOT NULL DEFAULT '{}',
-  raw_output_ref TEXT,
+  raw_output_path TEXT,
   created_at DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_findings_module ON findings(module);
 CREATE INDEX IF NOT EXISTS idx_findings_account ON findings(account_id);
 CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings(severity);
-CREATE TABLE IF NOT EXISTS raw_output (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  account_id TEXT NOT NULL,
-  module TEXT NOT NULL,
-  name TEXT NOT NULL,
-  payload BLOB NOT NULL,
-  created_at DATETIME NOT NULL
-);
 CREATE TABLE IF NOT EXISTS logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   account_id TEXT,
@@ -68,29 +62,45 @@ CREATE TABLE IF NOT EXISTS logs (
 );
 `
 
+// DBFileName is the name of the SQLite file inside an engagement directory.
+const DBFileName = "engagement.db"
+
+// Engagement is a per-run container: a directory on disk holding the SQLite
+// findings DB plus per-module/per-account subdirectories for raw tool output.
 type Engagement struct {
 	db *sql.DB
 	mu sync.Mutex
-	// Path to the SQLite file.
-	Path string
+	// Dir is the engagement root directory. engagement.db lives at
+	// filepath.Join(Dir, DBFileName); raw tool output lives at
+	// filepath.Join(Dir, <module>, <accountID>).
+	Dir string
 }
 
-func Open(path string) (*Engagement, error) {
-	db, err := sql.Open("sqlite", path)
+// Open opens an engagement at the given directory. The directory is created
+// if missing, and the SQLite schema is initialized.
+func Open(dir string) (*Engagement, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	dbPath := filepath.Join(dir, DBFileName)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1) // serialize writes; modernc/sqlite is safe but simpler this way
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
-	return &Engagement{db: db, Path: path}, nil
+	return &Engagement{db: db, Dir: dir}, nil
 }
 
 func (e *Engagement) Close() error { return e.db.Close() }
 
 func (e *Engagement) DB() *sql.DB { return e.db }
+
+// DBPath returns the absolute path to the SQLite file.
+func (e *Engagement) DBPath() string { return filepath.Join(e.Dir, DBFileName) }
 
 func (e *Engagement) SetMeta(ctx context.Context, key, value string) error {
 	_, err := e.db.ExecContext(ctx,
@@ -180,23 +190,27 @@ func (e *Engagement) Write(ctx context.Context, f findings.Finding) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	_, err = e.db.ExecContext(ctx,
-		`INSERT INTO findings(account_id, region, module, severity, resource_arn, title, detail_json, raw_output_ref, created_at)
+		`INSERT INTO findings(account_id, region, module, severity, resource_arn, title, detail_json, raw_output_path, created_at)
 		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		f.AccountID, f.Region, f.Module, string(f.Severity), f.ResourceARN, f.Title, detail, nullIfEmpty(f.RawOutputRef), created)
+		f.AccountID, f.Region, f.Module, string(f.Severity), f.ResourceARN, f.Title, detail, nullIfEmpty(f.RawOutputPath), created)
 	return err
 }
 
-func (e *Engagement) WriteRaw(ctx context.Context, module, accountID, name string, payload []byte) (string, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	res, err := e.db.ExecContext(ctx,
-		`INSERT INTO raw_output(account_id, module, name, payload, created_at) VALUES(?,?,?,?,?)`,
-		accountID, module, name, payload, time.Now().UTC())
-	if err != nil {
+// RawDir returns (and creates) the directory for a module's raw output for a
+// given account inside the engagement dir. Path is absolute.
+func (e *Engagement) RawDir(module, accountID string) (string, error) {
+	if module == "" {
+		return "", fmt.Errorf("module required")
+	}
+	parts := []string{e.Dir, module}
+	if accountID != "" {
+		parts = append(parts, accountID)
+	}
+	dir := filepath.Join(parts...)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	id, _ := res.LastInsertId()
-	return fmt.Sprintf("raw:%d", id), nil
+	return dir, nil
 }
 
 func (e *Engagement) LogEvent(ctx context.Context, module, accountID, level, msg string) error {

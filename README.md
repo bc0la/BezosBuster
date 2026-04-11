@@ -18,9 +18,10 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
   - ECS / ECR task definitions.
   - Roles with `AssumeRoleWithWebIdentity` and their trust policies.
   - **API Gateway / Lambda anonymous-reach analyzer**, including the wildcard-bypass logic (a rule like `arn:aws:execute-api:...:api-id/prod/*/dashboard/*` matching `prod/GET/admin/dashboard/createAdmin`).
-- **SQLite per engagement** — one `.db` file holds findings + raw tool output blobs.
+- **Engagement directory per run** — `engagements/<ts>-<acct>/` holds `engagement.db` (normalized findings, for the report) plus per-tool subdirs (`scoutsuite/<acct>/report.html`, `steampipe_insights/<acct>/results.json`, `pacu_cognito/<acct>/stdout.log`, …) that you read directly off the host mount.
 - **Bubble Tea TUI** — tabs for accounts, modules, findings, logs, live progress.
-- **Local web report** — `bezosbuster report <engagement.db>` opens a tabbed offline dashboard.
+- **Local web report** — `bezosbuster report <engagement-dir>` opens a tabbed offline dashboard with deep-links to each tool's raw output via `/raw/...`.
+- **Steampipe live dashboard** — `bezosbuster steampipe --profile X` runs `steampipe dashboard` in-container against the aws-insights mod on `:9194` for interactive browsing.
 
 ## Install
 
@@ -56,10 +57,13 @@ bezosbuster scan --profiles dev,staging,prod
 bezosbuster scan --profile mgmt --org --assume-role OrganizationAccountAccessRole
 
 # Resume an interrupted engagement
-bezosbuster resume engagements/2026-04-11-acme.db
+bezosbuster resume engagements/2026-04-11-143022-123456789012
 
 # Open the report
-bezosbuster report engagements/2026-04-11-acme.db
+bezosbuster report engagements/2026-04-11-143022-123456789012
+
+# Live Steampipe dashboard (map -p 9194:9194 on docker run)
+bezosbuster steampipe --profile my-sso-profile
 ```
 
 ## Layout

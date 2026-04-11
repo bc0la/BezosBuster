@@ -2,6 +2,7 @@ package steampipe_insights
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/you/bezosbuster/internal/creds"
 	"github.com/you/bezosbuster/internal/findings"
@@ -17,9 +18,15 @@ func (Module) Name() string       { return "steampipe_insights" }
 func (Module) Kind() module.Kind  { return module.KindExternal }
 func (Module) Requires() []string { return []string{"steampipe"} }
 
-// Runs `steampipe check all` against the aws-insights mod. The image is
-// expected to have the mod installed under /root/.steampipe/mods.
+// Runs `steampipe check all` against steampipe-mod-aws-insights, exporting
+// the full JSON results to <rawDir>/results.json alongside stdout/stderr.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	return exttool.Run(ctx, "steampipe_insights", t, sink, "steampipe",
-		[]string{"check", "all", "--mod-location", "/home/bb/mods/steampipe-mod-aws-insights", "--output", "json"})
+		func(rawDir string) []string {
+			return []string{
+				"check", "all",
+				"--mod-location", "/home/bb/mods/steampipe-mod-aws-insights",
+				"--export", "json=" + filepath.Join(rawDir, "results.json"),
+			}
+		})
 }

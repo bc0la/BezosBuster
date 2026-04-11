@@ -17,10 +17,10 @@ func (Module) Name() string       { return "pacu_cognito" }
 func (Module) Kind() module.Kind  { return module.KindExternal }
 func (Module) Requires() []string { return []string{"pacu"} }
 
-// Invokes pacu in non-interactive mode to run the cognito__enum module.
-// pacu is not truly non-interactive, but the Docker image ships with a helper
-// script `pacu-run` that wraps it.
+// pacu-run is a wrapper shell script baked into the Docker image. It
+// invokes pacu non-interactively against the named module. Session state
+// lives in pacu's own home; we capture stdout/stderr to rawDir.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	return exttool.Run(ctx, "pacu_cognito", t, sink, "pacu-run",
-		[]string{"--module", "cognito__enum"})
+		func(_ string) []string { return []string{"--module", "cognito__enum"} })
 }

@@ -82,9 +82,10 @@ function render() {
   const rows = allFindings.filter(f => !filter || JSON.stringify(f).toLowerCase().includes(filter));
   const content = document.getElementById('content');
   if (rows.length === 0) { content.textContent = 'no findings'; return; }
-  const h = ['<table><thead><tr><th>severity</th><th>account</th><th>region</th><th>module</th><th>title</th><th>resource</th><th>detail</th></tr></thead><tbody>'];
+  const h = ['<table><thead><tr><th>severity</th><th>account</th><th>region</th><th>module</th><th>title</th><th>resource</th><th>raw</th><th>detail</th></tr></thead><tbody>'];
   for (const f of rows) {
-    h.push(`<tr><td class="sev-${f.severity}">${f.severity}</td><td>${f.account_id}</td><td>${f.region}</td><td>${f.module}</td><td>${escape(f.title)}</td><td>${escape(f.resource_arn)}</td><td><details><summary>show</summary><pre>${escape(JSON.stringify(f.detail, null, 2))}</pre></details></td></tr>`);
+    const raw = f.raw_output_path ? `<a href="${f.raw_output_path}" target="_blank">browse</a>` : '';
+    h.push(`<tr><td class="sev-${f.severity}">${f.severity}</td><td>${f.account_id}</td><td>${f.region}</td><td>${f.module}</td><td>${escape(f.title)}</td><td>${escape(f.resource_arn)}</td><td>${raw}</td><td><details><summary>show</summary><pre>${escape(JSON.stringify(f.detail, null, 2))}</pre></details></td></tr>`);
   }
   h.push('</tbody></table>');
   content.innerHTML = h.join('');

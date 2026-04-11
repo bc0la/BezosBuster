@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+
+	"github.com/you/bezosbuster/internal/engagement"
 
 	_ "modernc.org/sqlite"
 )
@@ -13,9 +17,14 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-// Serve starts an HTTP server bound to addr that reads the given engagement
-// SQLite DB and exposes a tabbed report plus a small JSON API.
-func Serve(addr, dbPath string) error {
+// Serve starts an HTTP server bound to addr that reads the engagement DB
+// from dir and exposes a tabbed report, a small JSON API, and a static file
+// handler for browsing raw tool output written to dir.
+func Serve(addr, dir string) error {
+	dbPath := filepath.Join(dir, engagement.DBFileName)
+	if _, err := os.Stat(dbPath); err != nil {
+		return fmt.Errorf("engagement db not found at %s: %w", dbPath, err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return err
@@ -29,9 +38,12 @@ func Serve(addr, dbPath string) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
 	})
+	// Static browser for raw tool output files under the engagement dir.
+	// Safe because http.Dir rejects traversal outside dir.
+	mux.Handle("/raw/", http.StripPrefix("/raw/", http.FileServer(http.Dir(dir))))
 	mux.HandleFunc("/api/findings", func(w http.ResponseWriter, r *http.Request) {
 		module := r.URL.Query().Get("module")
-		rows, err := queryFindings(db, module)
+		rows, err := queryFindings(db, dir, module)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
@@ -51,19 +63,20 @@ func Serve(addr, dbPath string) error {
 }
 
 type findingRow struct {
-	ID          int64  `json:"id"`
-	AccountID   string `json:"account_id"`
-	Region      string `json:"region"`
-	Module      string `json:"module"`
-	Severity    string `json:"severity"`
-	ResourceARN string `json:"resource_arn"`
-	Title       string `json:"title"`
-	Detail      any    `json:"detail"`
-	CreatedAt   string `json:"created_at"`
+	ID            int64  `json:"id"`
+	AccountID     string `json:"account_id"`
+	Region        string `json:"region"`
+	Module        string `json:"module"`
+	Severity      string `json:"severity"`
+	ResourceARN   string `json:"resource_arn"`
+	Title         string `json:"title"`
+	Detail        any    `json:"detail"`
+	RawOutputPath string `json:"raw_output_path,omitempty"`
+	CreatedAt     string `json:"created_at"`
 }
 
-func queryFindings(db *sql.DB, module string) ([]findingRow, error) {
-	query := `SELECT id, account_id, region, module, severity, resource_arn, title, detail_json, created_at FROM findings`
+func queryFindings(db *sql.DB, dir, module string) ([]findingRow, error) {
+	query := `SELECT id, account_id, region, module, severity, resource_arn, title, detail_json, raw_output_path, created_at FROM findings`
 	var args []any
 	if module != "" {
 		query += " WHERE module = ?"
@@ -79,10 +92,17 @@ func queryFindings(db *sql.DB, module string) ([]findingRow, error) {
 	for rows.Next() {
 		var r findingRow
 		var detailJSON string
-		if err := rows.Scan(&r.ID, &r.AccountID, &r.Region, &r.Module, &r.Severity, &r.ResourceARN, &r.Title, &detailJSON, &r.CreatedAt); err != nil {
+		var rawPath sql.NullString
+		if err := rows.Scan(&r.ID, &r.AccountID, &r.Region, &r.Module, &r.Severity, &r.ResourceARN, &r.Title, &detailJSON, &rawPath, &r.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(detailJSON), &r.Detail)
+		if rawPath.Valid && rawPath.String != "" {
+			// Convert absolute path to a /raw/... URL relative to the engagement dir.
+			if rel, err := filepath.Rel(dir, rawPath.String); err == nil {
+				r.RawOutputPath = "/raw/" + filepath.ToSlash(rel) + "/"
+			}
+		}
 		out = append(out, r)
 	}
 	return out, nil

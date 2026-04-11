@@ -17,8 +17,8 @@ func (Module) Name() string       { return "bluecloudpeass" }
 func (Module) Kind() module.Kind  { return module.KindExternal }
 func (Module) Requires() []string { return []string{"blue-cloudpeass"} }
 
-// Blue-CloudPEASS is distributed as a python script; the Docker image symlinks
-// it onto PATH as `blue-cloudpeass`.
+// Blue-CloudPEASS just writes to stdout; we capture it in stdout.log.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
-	return exttool.Run(ctx, "bluecloudpeass", t, sink, "blue-cloudpeass", []string{"--provider", "aws"})
+	return exttool.Run(ctx, "bluecloudpeass", t, sink, "blue-cloudpeass",
+		func(_ string) []string { return []string{"--provider", "aws"} })
 }

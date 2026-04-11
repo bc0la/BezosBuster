@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func main() {
 		Use:   "bezosbuster",
 		Short: "Automated AWS whitebox pentest workflow",
 	}
-	root.AddCommand(scanCmd(), reportCmd(), modulesCmd(), resumeCmd())
+	root.AddCommand(scanCmd(), reportCmd(), modulesCmd(), resumeCmd(), steampipeCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -83,8 +84,8 @@ func scanCmd() *cobra.Command {
 			if err := os.MkdirAll(outDir, 0o755); err != nil {
 				return err
 			}
-			dbPath := filepath.Join(outDir, fmt.Sprintf("%s-%s.db", time.Now().UTC().Format("2006-01-02-150405"), targets[0].AccountID))
-			eng, err := engagement.Open(dbPath)
+			engDir := filepath.Join(outDir, fmt.Sprintf("%s-%s", time.Now().UTC().Format("2006-01-02-150405"), targets[0].AccountID))
+			eng, err := engagement.Open(engDir)
 			if err != nil {
 				return err
 			}
@@ -144,9 +145,9 @@ func runEngagement(ctx context.Context, eng *engagement.Engagement, targets []cr
 		if err := sched.Run(ctx, targets); err != nil {
 			return err
 		}
-		fmt.Printf("engagement db: %s\n", eng.Path)
+		fmt.Printf("engagement dir: %s\n", eng.Dir)
 		if watcher.Tripped() {
-			fmt.Fprintln(os.Stderr, "WARN: credentials expired mid-scan. Re-login and run `bezosbuster resume "+eng.Path+"`.")
+			fmt.Fprintln(os.Stderr, "WARN: credentials expired mid-scan. Re-login and run `bezosbuster resume "+eng.Dir+"`.")
 		}
 		return nil
 	}
@@ -160,9 +161,9 @@ func runEngagement(ctx context.Context, eng *engagement.Engagement, targets []cr
 	if err := <-errCh; err != nil {
 		return err
 	}
-	fmt.Printf("engagement db: %s\n", eng.Path)
+	fmt.Printf("engagement dir: %s\n", eng.Dir)
 	if watcher.Tripped() {
-		fmt.Fprintln(os.Stderr, "WARN: credentials expired mid-scan. Re-login and run `bezosbuster resume "+eng.Path+"`.")
+		fmt.Fprintln(os.Stderr, "WARN: credentials expired mid-scan. Re-login and run `bezosbuster resume "+eng.Dir+"`.")
 	}
 	return nil
 }
@@ -170,8 +171,8 @@ func runEngagement(ctx context.Context, eng *engagement.Engagement, targets []cr
 func reportCmd() *cobra.Command {
 	var addr string
 	c := &cobra.Command{
-		Use:   "report <engagement.db>",
-		Short: "Serve a local web report for an engagement SQLite file",
+		Use:   "report <engagement-dir>",
+		Short: "Serve a local web report for an engagement directory",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return report.Serve(addr, args[0])
@@ -194,18 +195,82 @@ func modulesCmd() *cobra.Command {
 	}
 }
 
+// steampipeCmd runs `steampipe dashboard` in the foreground against the
+// aws-insights mod, exposing the live HTML dashboard on :9194. The user is
+// expected to map that port with `docker run -p 9194:9194`. AWS_* env vars
+// are injected from the chosen profile so steampipe's aws plugin picks
+// them up automatically.
+func steampipeCmd() *cobra.Command {
+	var (
+		profile string
+		mod     string
+	)
+	c := &cobra.Command{
+		Use:   "steampipe",
+		Short: "Run steampipe dashboard in-container for live browsing",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+
+			targets, err := creds.Detect(ctx, creds.Options{Profile: profile})
+			if err != nil {
+				return fmt.Errorf("detect creds: %w", err)
+			}
+			if len(targets) == 0 {
+				return fmt.Errorf("no accounts detected")
+			}
+			t := targets[0]
+
+			v, err := t.Config.Credentials.Retrieve(ctx)
+			if err != nil {
+				return fmt.Errorf("retrieve credentials: %w", err)
+			}
+
+			binary, err := exec.LookPath("steampipe")
+			if err != nil {
+				return fmt.Errorf("steampipe not on PATH — run inside the bezosbuster Docker image: %w", err)
+			}
+
+			fmt.Printf("starting steampipe dashboard for account %s (mod: %s)\n", t.AccountID, mod)
+			fmt.Println("open http://127.0.0.1:9194 (make sure you ran `docker run -p 9194:9194`)")
+
+			scmd := exec.CommandContext(ctx, binary, "dashboard",
+				"--mod-location", mod,
+				"--dashboard-listen", "network",
+				"--dashboard-port", "9194",
+			)
+			scmd.Stdout = os.Stdout
+			scmd.Stderr = os.Stderr
+			scmd.Env = append(os.Environ(),
+				"AWS_ACCESS_KEY_ID="+v.AccessKeyID,
+				"AWS_SECRET_ACCESS_KEY="+v.SecretAccessKey,
+				"AWS_DEFAULT_REGION="+t.Config.Region,
+				"AWS_REGION="+t.Config.Region,
+			)
+			if v.SessionToken != "" {
+				scmd.Env = append(scmd.Env, "AWS_SESSION_TOKEN="+v.SessionToken)
+			}
+			return scmd.Run()
+		},
+	}
+	c.Flags().StringVar(&profile, "profile", "", "AWS profile to use for steampipe's aws plugin")
+	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-insights", "Steampipe mod location (default: aws-insights baked into the image)")
+	return c
+}
+
 func resumeCmd() *cobra.Command {
 	var noTUI bool
 	c := &cobra.Command{
-		Use:   "resume <engagement.db>",
+		Use:   "resume <engagement-dir>",
 		Short: "Resume an engagement whose scan was paused or interrupted",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			if _, err := os.Stat(args[0]); err != nil {
-				return fmt.Errorf("engagement db not found: %w", err)
+			dbFile := filepath.Join(args[0], engagement.DBFileName)
+			if _, err := os.Stat(dbFile); err != nil {
+				return fmt.Errorf("engagement db not found at %s: %w", dbFile, err)
 			}
 			eng, err := engagement.Open(args[0])
 			if err != nil {
