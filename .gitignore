@@ -1,0 +1,40 @@
+# Planning scratch
+plan.md
+
+# Engagement output — contains findings from real targets
+engagements/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Credentials / secrets
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+credentials
+credentials.json
+.aws/
+aws-credentials*
+*.tfvars
+*.tfvars.json
+
+# Build output
+/bezosbuster
+/bezosbuster.exe
+/dist/
+/out/
+*.test
+*.out
+coverage.*
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BezosBuster report</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; background: #111; color: #eee; }
+  header { padding: 16px 24px; border-bottom: 1px solid #333; background: #181818; }
+  header h1 { margin: 0 0 8px; font-size: 18px; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; }
+  nav button { background: #222; color: #eee; border: 1px solid #333; padding: 6px 12px; cursor: pointer; font: inherit; }
+  nav button.active { background: #2a4d69; border-color: #3a6d99; }
+  main { padding: 16px 24px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #222; text-align: left; vertical-align: top; }
+  th { background: #1a1a1a; position: sticky; top: 0; cursor: pointer; }
+  tr:hover { background: #1a1a1a; }
+  .sev-critical { color: #ff5b5b; font-weight: bold; }
+  .sev-high     { color: #ff9a3c; font-weight: bold; }
+  .sev-medium   { color: #ffd166; }
+  .sev-low      { color: #99d98c; }
+  .sev-info     { color: #7f8bd6; }
+  details { margin: 0; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0c0c0c; padding: 8px; border: 1px solid #222; }
+  .summary { display: flex; gap: 24px; margin-bottom: 16px; }
+  .summary div { background: #1a1a1a; padding: 8px 14px; border: 1px solid #2a2a2a; }
+  input[type=search] { background: #0c0c0c; color: #eee; border: 1px solid #333; padding: 6px 8px; width: 300px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BezosBuster report</h1>
+  <nav id="tabs"></nav>
+</header>
+<main>
+  <div class="summary" id="summary"></div>
+  <input type="search" id="filter" placeholder="filter…">
+  <div id="content"></div>
+</main>
+<script>
+let currentModule = "";
+let allFindings = [];
+
+async function loadSummary() {
+  const r = await fetch('/api/summary').then(r => r.json());
+  const tabs = document.getElementById('tabs');
+  tabs.innerHTML = '';
+  const mkBtn = (label, mod) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => { currentModule = mod; loadFindings(); renderTabs(); };
+    if (mod === currentModule) b.classList.add('active');
+    return b;
+  };
+  tabs.appendChild(mkBtn('All', ''));
+  (r.modules || []).forEach(m => tabs.appendChild(mkBtn(`${m.module} (${m.count})`, m.module)));
+  const s = document.getElementById('summary');
+  s.innerHTML = '';
+  Object.entries(r.severity || {}).forEach(([k, v]) => {
+    const d = document.createElement('div');
+    d.className = 'sev-' + k;
+    d.textContent = `${k}: ${v}`;
+    s.appendChild(d);
+  });
+}
+
+function renderTabs() {
+  document.querySelectorAll('#tabs button').forEach(b => {
+    b.classList.toggle('active', (b.textContent.startsWith('All') ? '' : b.textContent.split(' ')[0]) === currentModule);
+  });
+}
+
+async function loadFindings() {
+  const qs = currentModule ? `?module=${encodeURIComponent(currentModule)}` : '';
+  allFindings = await fetch('/api/findings' + qs).then(r => r.json()) || [];
+  render();
+}
+
+function render() {
+  const filter = document.getElementById('filter').value.toLowerCase();
+  const rows = allFindings.filter(f => !filter || JSON.stringify(f).toLowerCase().includes(filter));
+  const content = document.getElementById('content');
+  if (rows.length === 0) { content.textContent = 'no findings'; return; }
+  const h = ['<table><thead><tr><th>severity</th><th>account</th><th>region</th><th>module</th><th>title</th><th>resource</th><th>detail</th></tr></thead><tbody>'];
+  for (const f of rows) {
+    h.push(`<tr><td class="sev-${f.severity}">${f.severity}</td><td>${f.account_id}</td><td>${f.region}</td><td>${f.module}</td><td>${escape(f.title)}</td><td>${escape(f.resource_arn)}</td><td><details><summary>show</summary><pre>${escape(JSON.stringify(f.detail, null, 2))}</pre></details></td></tr>`);
+  }
+  h.push('</tbody></table>');
+  content.innerHTML = h.join('');
+}
+
+function escape(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+document.getElementById('filter').addEventListener('input', render);
+loadSummary().then(loadFindings);
+</script>
+</body>
+</html>
