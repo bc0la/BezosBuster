@@ -21,5 +21,5 @@ func (Module) Requires() []string { return []string{"steampipe"} }
 // expected to have the mod installed under /root/.steampipe/mods.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	return exttool.Run(ctx, "steampipe_insights", t, sink, "steampipe",
-		[]string{"check", "all", "--mod-location", "/root/mods/steampipe-mod-aws-insights", "--output", "json"})
+		[]string{"check", "all", "--mod-location", "/home/bb/mods/steampipe-mod-aws-insights", "--output", "json"})
 }

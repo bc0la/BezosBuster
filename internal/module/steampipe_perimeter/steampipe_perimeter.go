@@ -20,5 +20,5 @@ func (Module) Requires() []string { return []string{"steampipe"} }
 // Runs the mod-aws-perimeter benchmarks, focused on external attack surface.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	return exttool.Run(ctx, "steampipe_perimeter", t, sink, "steampipe",
-		[]string{"check", "all", "--mod-location", "/root/mods/steampipe-mod-aws-perimeter", "--output", "json"})
+		[]string{"check", "all", "--mod-location", "/home/bb/mods/steampipe-mod-aws-perimeter", "--output", "json"})
 }
