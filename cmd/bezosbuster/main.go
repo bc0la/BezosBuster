@@ -42,14 +42,20 @@ func main() {
 		Use:   "bezosbuster",
 		Short: "Automated AWS whitebox pentest workflow",
 	}
-	root.AddCommand(scanCmd(), reportCmd(), modulesCmd(), resumeCmd(), steampipeCmd())
+	root.AddCommand(
+		runCmd("scan", "Run native AWS-SDK checks (fast, in-process)", "native"),
+		runCmd("collect", "Run external tools (ScoutSuite, Steampipe mods, Pacu, Blue-CloudPEASS)", "external"),
+		reportCmd(), modulesCmd(), resumeCmd(), steampipeCmd(),
+	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func scanCmd() *cobra.Command {
+// runCmd builds either the `scan` (kind=native) or `collect` (kind=external)
+// subcommand. They share all flags; only the kind filter differs.
+func runCmd(use, short, kind string) *cobra.Command {
 	var (
 		profile    string
 		profiles   []string
@@ -57,12 +63,13 @@ func scanCmd() *cobra.Command {
 		assumeRole string
 		region     string
 		outDir     string
+		engDir     string
 		moduleList []string
 		noTUI      bool
 	)
 	c := &cobra.Command{
-		Use:   "scan",
-		Short: "Run all modules against one or more AWS accounts",
+		Use:   use,
+		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
@@ -81,27 +88,37 @@ func scanCmd() *cobra.Command {
 				return fmt.Errorf("no accounts detected")
 			}
 
-			if err := os.MkdirAll(outDir, 0o755); err != nil {
-				return err
+			// Resolve final module list using the kind filter + user subset.
+			modules := selectModules(kind, moduleList)
+			if len(modules) == 0 {
+				return fmt.Errorf("no %s modules to run", kind)
 			}
-			engDir := filepath.Join(outDir, fmt.Sprintf("%s-%s", time.Now().UTC().Format("2006-01-02-150405"), targets[0].AccountID))
-			eng, err := engagement.Open(engDir)
+
+			// Engagement directory: existing one if --engagement was given,
+			// otherwise a new timestamped one.
+			finalDir := engDir
+			if finalDir == "" {
+				if err := os.MkdirAll(outDir, 0o755); err != nil {
+					return err
+				}
+				finalDir = filepath.Join(outDir, fmt.Sprintf("%s-%s", time.Now().UTC().Format("2006-01-02-150405"), targets[0].AccountID))
+			}
+			eng, err := engagement.Open(finalDir)
 			if err != nil {
 				return err
 			}
 			defer eng.Close()
 			_ = eng.SetMeta(ctx, "started_at", time.Now().UTC().Format(time.RFC3339))
 			_ = eng.SetMeta(ctx, "targets", strings.Join(targetIDs(targets), ","))
-
-			// Persist scan options so `resume` can reuse them.
 			_ = eng.SetMeta(ctx, "opt.profile", profile)
 			_ = eng.SetMeta(ctx, "opt.profiles", strings.Join(profiles, ","))
 			_ = eng.SetMeta(ctx, "opt.org", boolStr(org))
 			_ = eng.SetMeta(ctx, "opt.assume_role", assumeRole)
 			_ = eng.SetMeta(ctx, "opt.region", region)
+			_ = eng.SetMeta(ctx, "opt.kind", kind)
 			_ = eng.SetMeta(ctx, "opt.modules", strings.Join(moduleList, ","))
 
-			return runEngagement(ctx, eng, targets, moduleList, nil, noTUI)
+			return runEngagement(ctx, eng, targets, modules, nil, noTUI)
 		},
 	}
 	c.Flags().StringVar(&profile, "profile", "", "AWS profile (single-account mode)")
@@ -109,10 +126,44 @@ func scanCmd() *cobra.Command {
 	c.Flags().BoolVar(&org, "org", false, "Auto-enumerate Organizations and assume-role into each account")
 	c.Flags().StringVar(&assumeRole, "assume-role", "OrganizationAccountAccessRole", "Role name to assume in org mode")
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
-	c.Flags().StringVar(&outDir, "out", "engagements", "Engagement output directory")
-	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all)")
+	c.Flags().StringVar(&outDir, "out", "engagements", "Parent dir for new engagements")
+	c.Flags().StringVar(&engDir, "engagement", "", "Existing engagement dir to append to (default: create new)")
+	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all of this kind)")
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
 	return c
+}
+
+// selectModules returns the final list of module names to run given a kind
+// filter ("native", "external", or "" for all) and an optional explicit
+// user subset. If subset is non-empty, it wins (intersected with registry).
+func selectModules(kind string, subset []string) []string {
+	all := module.All()
+	allowedKind := func(k module.Kind) bool {
+		switch kind {
+		case "native":
+			return k == module.KindNative
+		case "external":
+			return k == module.KindExternal
+		default:
+			return true
+		}
+	}
+	if len(subset) > 0 {
+		var out []string
+		for _, name := range subset {
+			if m, ok := module.Get(name); ok && allowedKind(m.Kind()) {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	var out []string
+	for _, m := range all {
+		if allowedKind(m.Kind()) {
+			out = append(out, m.Name())
+		}
+	}
+	return out
 }
 
 func targetIDs(ts []creds.AccountTarget) []string {
@@ -196,34 +247,44 @@ func modulesCmd() *cobra.Command {
 }
 
 // steampipeCmd runs `steampipe dashboard` in the foreground against the
-// aws-insights mod, exposing the live HTML dashboard on :9194. The user is
-// expected to map that port with `docker run -p 9194:9194`. AWS_* env vars
-// are injected from the chosen profile so steampipe's aws plugin picks
-// them up automatically.
+// aws-insights mod. It accepts the same credential options as scan/collect
+// (single profile, profile list, or full org enumerate) and generates a
+// steampipe aws plugin connection config with one connection per detected
+// account plus an aggregator connection (aws_bb_all) that lets you query
+// every account in one statement, e.g.
+//
+//	select account_id, name from aws_bb_all.aws_s3_bucket where bucket_policy_is_public;
+//
+// The dashboard listens on 0.0.0.0:9194 inside the container; map it with
+// `docker run -p 9194:9194`.
 func steampipeCmd() *cobra.Command {
 	var (
-		profile string
-		mod     string
+		profile    string
+		profiles   []string
+		org        bool
+		assumeRole string
+		region     string
+		mod        string
 	)
 	c := &cobra.Command{
 		Use:   "steampipe",
-		Short: "Run steampipe dashboard in-container for live browsing",
+		Short: "Run steampipe dashboard in-container for live multi-account browsing",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			targets, err := creds.Detect(ctx, creds.Options{Profile: profile})
+			targets, err := creds.Detect(ctx, creds.Options{
+				Profile:    profile,
+				Profiles:   profiles,
+				Org:        org,
+				AssumeRole: assumeRole,
+				Region:     region,
+			})
 			if err != nil {
 				return fmt.Errorf("detect creds: %w", err)
 			}
 			if len(targets) == 0 {
 				return fmt.Errorf("no accounts detected")
-			}
-			t := targets[0]
-
-			v, err := t.Config.Credentials.Retrieve(ctx)
-			if err != nil {
-				return fmt.Errorf("retrieve credentials: %w", err)
 			}
 
 			binary, err := exec.LookPath("steampipe")
@@ -231,8 +292,16 @@ func steampipeCmd() *cobra.Command {
 				return fmt.Errorf("steampipe not on PATH — run inside the bezosbuster Docker image: %w", err)
 			}
 
-			fmt.Printf("starting steampipe dashboard for account %s (mod: %s)\n", t.AccountID, mod)
-			fmt.Println("open http://127.0.0.1:9194 (make sure you ran `docker run -p 9194:9194`)")
+			cfgPath, err := writeSteampipeAWSConfig(ctx, targets)
+			if err != nil {
+				return fmt.Errorf("write steampipe config: %w", err)
+			}
+			fmt.Printf("wrote steampipe aws config: %s\n", cfgPath)
+			for _, t := range targets {
+				fmt.Printf("  connection aws_bb_%s  (%s)\n", t.AccountID, t.Alias)
+			}
+			fmt.Println("aggregator: aws_bb_all  — e.g. select * from aws_bb_all.aws_account")
+			fmt.Println("starting steampipe dashboard on :9194 (open http://127.0.0.1:9194)")
 
 			scmd := exec.CommandContext(ctx, binary, "dashboard",
 				"--mod-location", mod,
@@ -241,21 +310,63 @@ func steampipeCmd() *cobra.Command {
 			)
 			scmd.Stdout = os.Stdout
 			scmd.Stderr = os.Stderr
-			scmd.Env = append(os.Environ(),
-				"AWS_ACCESS_KEY_ID="+v.AccessKeyID,
-				"AWS_SECRET_ACCESS_KEY="+v.SecretAccessKey,
-				"AWS_DEFAULT_REGION="+t.Config.Region,
-				"AWS_REGION="+t.Config.Region,
-			)
-			if v.SessionToken != "" {
-				scmd.Env = append(scmd.Env, "AWS_SESSION_TOKEN="+v.SessionToken)
-			}
+			scmd.Env = os.Environ()
 			return scmd.Run()
 		},
 	}
-	c.Flags().StringVar(&profile, "profile", "", "AWS profile to use for steampipe's aws plugin")
-	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-insights", "Steampipe mod location (default: aws-insights baked into the image)")
+	c.Flags().StringVar(&profile, "profile", "", "AWS profile (single-account mode)")
+	c.Flags().StringSliceVar(&profiles, "profiles", nil, "Comma-separated profile list")
+	c.Flags().BoolVar(&org, "org", false, "Auto-enumerate Organizations and assume-role into each account")
+	c.Flags().StringVar(&assumeRole, "assume-role", "OrganizationAccountAccessRole", "Role name to assume in org mode")
+	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
+	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-insights", "Steampipe mod location")
 	return c
+}
+
+// writeSteampipeAWSConfig emits one steampipe aws plugin connection per
+// target plus an aggregator. Concrete credentials (including session
+// tokens for assumed roles) are resolved now and embedded in the config.
+// The file is written to ~/.steampipe/config/bezosbuster-aws.spc with
+// 0600 permissions.
+func writeSteampipeAWSConfig(ctx context.Context, targets []creds.AccountTarget) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	cfgDir := filepath.Join(home, ".steampipe", "config")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		return "", err
+	}
+	cfgPath := filepath.Join(cfgDir, "bezosbuster-aws.spc")
+
+	var b strings.Builder
+	b.WriteString("# generated by bezosbuster steampipe — do not edit\n\n")
+	for _, t := range targets {
+		v, err := t.Config.Credentials.Retrieve(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "skip account %s: %v\n", t.AccountID, err)
+			continue
+		}
+		fmt.Fprintf(&b, "connection \"aws_bb_%s\" {\n", t.AccountID)
+		b.WriteString("  plugin        = \"aws\"\n")
+		fmt.Fprintf(&b, "  access_key    = %q\n", v.AccessKeyID)
+		fmt.Fprintf(&b, "  secret_key    = %q\n", v.SecretAccessKey)
+		if v.SessionToken != "" {
+			fmt.Fprintf(&b, "  session_token = %q\n", v.SessionToken)
+		}
+		b.WriteString("  regions       = [\"*\"]\n")
+		b.WriteString("}\n\n")
+	}
+	b.WriteString("connection \"aws_bb_all\" {\n")
+	b.WriteString("  plugin      = \"aws\"\n")
+	b.WriteString("  type        = \"aggregator\"\n")
+	b.WriteString("  connections = [\"aws_bb_*\"]\n")
+	b.WriteString("}\n")
+
+	if err := os.WriteFile(cfgPath, []byte(b.String()), 0o600); err != nil {
+		return "", err
+	}
+	return cfgPath, nil
 }
 
 func resumeCmd() *cobra.Command {
@@ -295,29 +406,24 @@ func resumeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			modules := selectModules(opts.kind, opts.modules)
 			remaining := 0
-			modCount := len(module.All())
-			if len(opts.modules) > 0 {
-				modCount = len(opts.modules)
-			}
 			for _, t := range targets {
-				for _, m := range module.All() {
-					if len(opts.modules) > 0 && !contains(opts.modules, m.Name()) {
-						continue
-					}
-					if !done[t.AccountID+"|"+m.Name()] {
+				for _, name := range modules {
+					if !done[t.AccountID+"|"+name] {
 						remaining++
 					}
 				}
 			}
-			fmt.Printf("resume: %d targets × %d modules, %d pairs already complete, %d to run\n",
-				len(targets), modCount, len(done), remaining)
+			fmt.Printf("resume (%s): %d targets × %d modules, %d pairs already complete, %d to run\n",
+				orDefault(opts.kind, "all"), len(targets), len(modules), len(done), remaining)
 			if remaining == 0 {
 				fmt.Println("nothing to do.")
 				return nil
 			}
 
-			return runEngagement(ctx, eng, targets, opts.modules, done, noTUI)
+			return runEngagement(ctx, eng, targets, modules, done, noTUI)
 		},
 	}
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
@@ -326,6 +432,7 @@ func resumeCmd() *cobra.Command {
 
 type scanOpts struct {
 	cred    creds.Options
+	kind    string
 	modules []string
 }
 
@@ -342,6 +449,7 @@ func readScanOpts(ctx context.Context, eng *engagement.Engagement) (scanOpts, er
 	out.cred.Org = get("opt.org") == "true"
 	out.cred.AssumeRole = get("opt.assume_role")
 	out.cred.Region = get("opt.region")
+	out.kind = get("opt.kind")
 	if v := get("opt.modules"); v != "" {
 		out.modules = strings.Split(v, ",")
 	}
@@ -355,4 +463,11 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

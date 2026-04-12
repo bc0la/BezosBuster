@@ -46,9 +46,18 @@ You'll also need `scoutsuite`, `pacu`, `steampipe`, and `Blue-CloudPEASS` on `PA
 
 ## Usage
 
+Two run commands — `scan` for the fast native checks, `collect` for the slow external tools — share all flags.
+
 ```bash
-# Single profile
+# Fast native checks against one account
 bezosbuster scan --profile dev
+
+# Slow external tools (ScoutSuite, Steampipe mods, Pacu, Blue-CloudPEASS)
+bezosbuster collect --profile dev
+
+# Run both into the same engagement directory
+bezosbuster scan --profile dev
+bezosbuster collect --profile dev --engagement engagements/2026-04-11-143022-123456789012
 
 # Explicit profile list
 bezosbuster scan --profiles dev,staging,prod
@@ -56,14 +65,18 @@ bezosbuster scan --profiles dev,staging,prod
 # Organization auto-enumerate (assume-role into every account)
 bezosbuster scan --profile mgmt --org --assume-role OrganizationAccountAccessRole
 
-# Resume an interrupted engagement
+# Resume — picks up the kind/modules of whatever last ran
 bezosbuster resume engagements/2026-04-11-143022-123456789012
 
 # Open the report
 bezosbuster report engagements/2026-04-11-143022-123456789012
 
-# Live Steampipe dashboard (map -p 9194:9194 on docker run)
-bezosbuster steampipe --profile my-sso-profile
+# Live multi-account Steampipe dashboard
+# Generates one connection per detected account + an aws_bb_all aggregator.
+# Map -p 9194:9194 on docker run.
+bezosbuster steampipe --profile mgmt --org
+# then in the dashboard:
+#   select account_id, name from aws_bb_all.aws_s3_bucket where bucket_policy_is_public;
 ```
 
 ## Layout
