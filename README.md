@@ -19,6 +19,7 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
   - ECS / ECR task definitions.
   - Roles with `AssumeRoleWithWebIdentity` and their trust policies/conditions.
   - **API Gateway / Lambda anonymous-reach analyzer**, including the wildcard-bypass logic (a rule like `arn:aws:execute-api:...:api-id/prod/*/dashboard/*` matching `prod/GET/admin/dashboard/createAdmin`).
+  - **IAM integrations / federation review** — SAML + OIDC providers, role trust policies, **deep GitHub Actions `:sub` claim analysis** (catches `repo:*` wildcards, org-wide subjects, wildcard owners, missing `:aud`, pull-request subjects), Cognito identity pools with anonymous access, wildcard principals.
 - **Engagement directory per run** — `engagements/<ts>-<acct>/` holds `engagement.db` (normalized findings, powers the report) plus per-tool subdirs (`scoutsuite/<acct>/report.html`, `steampipe_insights/<acct>/results.json`, `pacu_cognito/<acct>/stdout.log`, …) readable straight off the host mount.
 - **Bubble Tea TUI** — tabs for accounts, modules, logs, live progress.
 - **Local web report** — `bezosbuster report <dir>` serves a tabbed offline dashboard with deep-links to each tool's raw output via `/raw/...`.
@@ -72,7 +73,7 @@ All subcommands share the same credential-detection logic:
 
 The fast path. Everything runs in-process against the AWS SDK; typical run is seconds to minutes. This is what you want first on any engagement.
 
-**What runs** (all modules where `Kind() == native`):
+**What runs** (all 9 modules where `Kind() == native`):
 - `apigw_lambda` — API Gateway + Lambda anonymous-reach + wildcard-crossing ARN analyzer.
 - `public_amis` — `DescribeImages --executable-users all`, filtered to `Owners=self`.
 - `public_snapshots` — `DescribeSnapshots --restorable-by-user-ids all`, filtered to `Owners=self`.
@@ -404,6 +405,7 @@ internal/
   orchestrator/           scheduler, per-account + global semaphores
   module/                 Module interface + registry
     apigw_lambda/         API Gateway wildcard analyzer (canonical native check)
+    iam_integrations/     SAML/OIDC providers, trust policies, Cognito pools
     public_amis/ public_snapshots/ public_rds/ public_ecr/
     lambda_env/ ecs_ecr_taskdefs/ web_identity/
     exttool/              shared helper for external-tool wrappers
@@ -416,16 +418,17 @@ internal/
 Dockerfile                multi-stage: Go 1.25 + steampipe + scoutsuite + pacu + bluecloudpeass
 .github/workflows/
   docker.yml              build + push ghcr.io/bc0la/bezosbuster on tag v*
+                          (skips builds when only *.md / docs/** change)
 ```
 
 ## Verification
 
-1. Unit: module registry loads, APIGW wildcard analyzer (`internal/module/apigw_lambda/wildcard_test.go`) covers the canonical `prod/*/dashboard/*` → `prod/GET/admin/dashboard/createAdmin` bypass case.
+1. Unit: module registry loads, APIGW wildcard analyzer (`internal/module/apigw_lambda/wildcard_test.go`) covers the canonical `prod/*/dashboard/*` → `prod/GET/admin/dashboard/createAdmin` bypass case; GitHub OIDC `:sub` analyzer (`internal/module/iam_integrations/github_oidc_test.go`) covers the 12 known takeover patterns.
 2. Smoke against a throwaway account:
    - `bb scan --profile test` → TUI runs, `engagement.db` populated.
    - `bb collect --profile test --engagement <dir>` → external tool output lands under `<dir>/<tool>/<acct>/`.
    - `bb-report /data/<dir>` → browser UI loads, raw links resolve.
    - Revoke SSO, confirm `scan` warns and `resume` continues.
 3. Org mode: run against an account with `organizations:ListAccounts`. Confirms per-account fan-out and that failed assume-roles are logged not fatal.
-4. Docker: `docker build -t bezosbuster .` then `docker run --rm bezosbuster modules` lists 13 modules.
+4. Docker: `docker build -t bezosbuster .` then `docker run --rm bezosbuster modules` lists 14 modules.
 5. Multi-account steampipe: `bb-steampipe --profile mgmt --org` generates `bezosbuster-aws.spc` with one connection per account, dashboard serves on `:9194`, `select * from aws_bb_all.aws_account` returns a row per target.
