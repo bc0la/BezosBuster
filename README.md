@@ -81,6 +81,7 @@ The fast path. Everything runs in-process against the AWS SDK; typical run is se
 - `lambda_env` — dumps all Lambda env vars, flags secret-like keys/values.
 - `ecs_ecr_taskdefs` — active ECS task definitions with containers, images, env, task/exec roles.
 - `web_identity` — IAM roles trusting `sts:AssumeRoleWithWebIdentity`, flagged critical if the trust policy has no `Condition`.
+- `iam_integrations` — comprehensive identity federation review. Enumerates SAML + OIDC providers; cross-references them against role trust policies; condition-aware analysis of every `sts:AssumeRole` / `sts:AssumeRoleWithWebIdentity` / `sts:AssumeRoleWithSAML` statement; **deep GitHub Actions `:sub` claim analysis** (catches `repo:*` / `repo:org/*` / wildcard owners / missing `:aud` / missing `:sub` / pull-request subjects); SAML metadata expiry; orphaned providers; Cognito identity pools with `AllowUnauthenticatedIdentities=true` or classic flow; wildcard principals.
 
 **Order of operations:**
 1. Parse flags, signal-notify context (Ctrl-C stops cleanly).

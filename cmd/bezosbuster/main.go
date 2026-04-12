@@ -25,6 +25,7 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/apigw_lambda"
 	_ "github.com/you/bezosbuster/internal/module/bluecloudpeass"
 	_ "github.com/you/bezosbuster/internal/module/ecs_ecr_taskdefs"
+	_ "github.com/you/bezosbuster/internal/module/iam_integrations"
 	_ "github.com/you/bezosbuster/internal/module/lambda_env"
 	_ "github.com/you/bezosbuster/internal/module/pacu_cognito"
 	_ "github.com/you/bezosbuster/internal/module/public_amis"
