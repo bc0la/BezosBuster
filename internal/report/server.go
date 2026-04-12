@@ -82,7 +82,7 @@ func queryFindings(db *sql.DB, dir, module string) ([]findingRow, error) {
 		query += " WHERE module = ?"
 		args = append(args, module)
 	}
-	query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id DESC LIMIT 2000"
+	query += " ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, id DESC LIMIT 20000"
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
