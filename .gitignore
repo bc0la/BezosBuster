@@ -31,6 +31,9 @@ aws-credentials*
 *.out
 coverage.*
 
+# Claude Code
+.claude/
+
 # Editor / OS
 .vscode/
 .idea/
