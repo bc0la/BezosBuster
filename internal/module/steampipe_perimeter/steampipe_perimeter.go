@@ -16,17 +16,17 @@ func init() { module.Register(Module{}) }
 
 func (Module) Name() string       { return "steampipe_perimeter" }
 func (Module) Kind() module.Kind  { return module.KindExternal }
-func (Module) Requires() []string { return []string{"steampipe"} }
+func (Module) Requires() []string { return []string{"powerpipe"} }
 
 // Runs the mod-aws-perimeter benchmarks and exports results to
 // <rawDir>/results.json.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
-	return exttool.Run(ctx, "steampipe_perimeter", t, sink, "steampipe",
+	return exttool.Run(ctx, "steampipe_perimeter", t, sink, "powerpipe",
 		func(rawDir string) []string {
 			return []string{
-				"check", "all",
+				"benchmark", "run", "all",
 				"--mod-location", "/home/bb/mods/steampipe-mod-aws-perimeter",
-				"--export", "json=" + filepath.Join(rawDir, "results.json"),
+				"--export", filepath.Join(rawDir, "results.json"),
 			}
 		})
 }
