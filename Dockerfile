@@ -34,9 +34,12 @@ RUN curl -fsSL https://powerpipe.io/install/powerpipe.sh -o /tmp/powerpipe.sh \
  && bash /tmp/powerpipe.sh \
  && rm /tmp/powerpipe.sh
 
-# Blue-CloudPEASS clone (as root, world-readable)
+# Blue-CloudPEASS clone (as root, world-readable) + install all Python deps
 RUN git clone --depth=1 https://github.com/peass-ng/Blue-CloudPEASS /opt/Blue-CloudPEASS \
- && find /opt/Blue-CloudPEASS -type f -name '*.py' -exec chmod +x {} \;
+ && find /opt/Blue-CloudPEASS -type f -name '*.py' -exec chmod +x {} \; \
+ && if [ -f /opt/Blue-CloudPEASS/requirements.txt ]; then \
+      /opt/venv/bin/pip install --no-cache-dir -r /opt/Blue-CloudPEASS/requirements.txt; \
+    fi
 
 # Blue-CloudPEASS wrapper (the AWS entry point is Blue-AWSPEAS.py at repo root)
 RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n' > /usr/local/bin/blue-cloudpeass \
@@ -44,22 +47,24 @@ RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n'
 
 # pacu wrapper for non-interactive single-module runs
 # Session "bezosbuster" is pre-created during build (see below).
-# --exec is required for non-interactive execution; --set-regions all
-# ensures the module scans every region.
-RUN printf '#!/bin/sh\nexec /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all -q\n' > /usr/local/bin/pacu-run \
+# Pipe "y" to accept the all-regions confirmation prompt.
+RUN printf '#!/bin/sh\necho y | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all\n' > /usr/local/bin/pacu-run \
  && chmod +x /usr/local/bin/pacu-run
 
 # powerpipe-run wrapper: manages steampipe service lifecycle around powerpipe.
 # Each invocation picks a random port so concurrent module runs don't collide.
+# Passes --database to powerpipe so it connects to the right steampipe instance.
 COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
 #!/bin/sh
-PORT=$((19200 + ($$  % 10000)))
-export STEAMPIPE_DATABASE_PORT=$PORT
+PORT=$((19200 + ($$ % 10000)))
 steampipe service start --database-listen local --database-port "$PORT" >/dev/null 2>&1
-for i in 1 2 3 4 5; do steampipe service status >/dev/null 2>&1 && break; sleep 1; done
-powerpipe "$@"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  steampipe service status --database-port "$PORT" >/dev/null 2>&1 && break
+  sleep 1
+done
+powerpipe "$@" --database "postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
 rc=$?
-steampipe service stop >/dev/null 2>&1
+steampipe service stop --database-port "$PORT" >/dev/null 2>&1
 exit $rc
 WRAPPER
 RUN chmod +x /usr/local/bin/powerpipe-run
