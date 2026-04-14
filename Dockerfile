@@ -21,15 +21,15 @@ RUN useradd -m -u 1000 -s /bin/bash bb
 
 # Python tools as root (writes to /opt) — ScoutSuite + Pacu in a venv.
 RUN python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir scoutsuite pacu \
+ && /opt/venv/bin/pip install --no-cache-dir scoutsuite pacu termcolor \
  && chmod -R a+rX /opt/venv
 
-# Steampipe binary install (as root, places /usr/local/bin/steampipe)
+# Steampipe (database + plugin engine)
 RUN curl -fsSL https://steampipe.io/install/steampipe.sh -o /tmp/steampipe.sh \
  && bash /tmp/steampipe.sh \
  && rm /tmp/steampipe.sh
 
-# Powerpipe binary install (steampipe check → powerpipe benchmark run)
+# Powerpipe (benchmarks + dashboards — replaces `steampipe check`)
 RUN curl -fsSL https://powerpipe.io/install/powerpipe.sh -o /tmp/powerpipe.sh \
  && bash /tmp/powerpipe.sh \
  && rm /tmp/powerpipe.sh
@@ -44,12 +44,25 @@ RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n'
 
 # pacu wrapper for non-interactive single-module runs
 # Session "bezosbuster" is pre-created during build (see below).
-RUN printf '#!/bin/sh\nexec /opt/venv/bin/pacu --session bezosbuster --module-name "$2" --module-args ""\n' > /usr/local/bin/pacu-run \
+# --exec is required for non-interactive execution; --set-regions all
+# ensures the module scans every region.
+RUN printf '#!/bin/sh\nexec /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all -q\n' > /usr/local/bin/pacu-run \
  && chmod +x /usr/local/bin/pacu-run
 
-# powerpipe wrapper: starts steampipe service, runs powerpipe, stops service
-RUN printf '#!/bin/sh\nsteampipe service start --database-listen local --database-port 9193 2>/dev/null\npowerpipe "$@"\nrc=$?\nsteampipe service stop 2>/dev/null\nexit $rc\n' > /usr/local/bin/powerpipe-run \
- && chmod +x /usr/local/bin/powerpipe-run
+# powerpipe-run wrapper: manages steampipe service lifecycle around powerpipe.
+# Each invocation picks a random port so concurrent module runs don't collide.
+COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
+#!/bin/sh
+PORT=$((19200 + ($$  % 10000)))
+export STEAMPIPE_DATABASE_PORT=$PORT
+steampipe service start --database-listen local --database-port "$PORT" >/dev/null 2>&1
+for i in 1 2 3 4 5; do steampipe service status >/dev/null 2>&1 && break; sleep 1; done
+powerpipe "$@"
+rc=$?
+steampipe service stop >/dev/null 2>&1
+exit $rc
+WRAPPER
+RUN chmod +x /usr/local/bin/powerpipe-run
 
 ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
