@@ -38,13 +38,18 @@ RUN curl -fsSL https://powerpipe.io/install/powerpipe.sh -o /tmp/powerpipe.sh \
 RUN git clone --depth=1 https://github.com/peass-ng/Blue-CloudPEASS /opt/Blue-CloudPEASS \
  && find /opt/Blue-CloudPEASS -type f -name '*.py' -exec chmod +x {} \;
 
-# Blue-CloudPEASS wrapper (handles missing shebang / python3 invocation)
-RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/src/BluePEASS.py "$@"\n' > /usr/local/bin/blue-cloudpeass \
+# Blue-CloudPEASS wrapper (the AWS entry point is Blue-AWSPEAS.py at repo root)
+RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n' > /usr/local/bin/blue-cloudpeass \
  && chmod +x /usr/local/bin/blue-cloudpeass
 
 # pacu wrapper for non-interactive single-module runs
-RUN printf '#!/bin/sh\nprintf "exit\\n" | /opt/venv/bin/pacu --new-session bezosbuster 2>/dev/null || true\nexec /opt/venv/bin/pacu --session bezosbuster --module-name "$2" --module-args ""\n' > /usr/local/bin/pacu-run \
+# Session "bezosbuster" is pre-created during build (see below).
+RUN printf '#!/bin/sh\nexec /opt/venv/bin/pacu --session bezosbuster --module-name "$2" --module-args ""\n' > /usr/local/bin/pacu-run \
  && chmod +x /usr/local/bin/pacu-run
+
+# powerpipe wrapper: starts steampipe service, runs powerpipe, stops service
+RUN printf '#!/bin/sh\nsteampipe service start --database-listen local --database-port 9193 2>/dev/null\npowerpipe "$@"\nrc=$?\nsteampipe service stop 2>/dev/null\nexit $rc\n' > /usr/local/bin/powerpipe-run \
+ && chmod +x /usr/local/bin/powerpipe-run
 
 ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 

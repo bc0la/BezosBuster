@@ -16,13 +16,13 @@ func init() { module.Register(Module{}) }
 
 func (Module) Name() string       { return "steampipe_insights" }
 func (Module) Kind() module.Kind  { return module.KindExternal }
-func (Module) Requires() []string { return []string{"powerpipe"} }
+func (Module) Requires() []string { return []string{"powerpipe-run"} }
 
-// Runs `powerpipe benchmark run all` against steampipe-mod-aws-insights,
-// exporting the full JSON results to <rawDir>/results.json alongside
-// stdout/stderr.
+// Runs `powerpipe benchmark run all` against steampipe-mod-aws-insights
+// via the powerpipe-run wrapper (which manages the steampipe service
+// lifecycle), exporting JSON results to <rawDir>/results.json.
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
-	return exttool.Run(ctx, "steampipe_insights", t, sink, "powerpipe",
+	return exttool.Run(ctx, "steampipe_insights", t, sink, "powerpipe-run",
 		func(rawDir string) []string {
 			return []string{
 				"benchmark", "run", "all",
