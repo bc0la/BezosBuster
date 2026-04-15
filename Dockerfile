@@ -56,19 +56,18 @@ RUN chmod +x /usr/local/bin/pacu-run
 
 # powerpipe-run wrapper: manages steampipe service lifecycle around powerpipe.
 # Each invocation picks a random port so concurrent module runs don't collide.
-# Uses STEAMPIPE_DATABASE_PORT env var (works with both steampipe and powerpipe).
 COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
 #!/bin/bash
 PORT=$((19200 + (RANDOM % 10000)))
-export STEAMPIPE_DATABASE_PORT=$PORT
-steampipe service start --database-listen local >/dev/null 2>&1
+steampipe service start --database-listen local --database-port "$PORT" >/dev/null 2>&1
 for i in $(seq 1 10); do
   (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break
   sleep 1
 done
-powerpipe "$@" --var "database=postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
+export POWERPIPE_DATABASE="postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
+powerpipe "$@"
 rc=$?
-steampipe service stop >/dev/null 2>&1
+steampipe service stop --database-port "$PORT" >/dev/null 2>&1
 exit $rc
 WRAPPER
 RUN chmod +x /usr/local/bin/powerpipe-run
