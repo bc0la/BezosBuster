@@ -1,9 +1,12 @@
 package creds
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -145,6 +148,56 @@ func enumerateOrg(ctx context.Context, base AccountTarget, roleName string) ([]A
 		})
 	}
 	return targets, nil
+}
+
+// ListProfiles returns all profile names found in ~/.aws/config and
+// ~/.aws/credentials. The "default" profile is included if present.
+func ListProfiles() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, path := range []string{
+		filepath.Join(home, ".aws", "config"),
+		filepath.Join(home, ".aws", "credentials"),
+	} {
+		names, _ := parseProfileNames(path)
+		for _, n := range names {
+			seen[n] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// parseProfileNames extracts profile names from an INI-style AWS config file.
+// In ~/.aws/config sections are "[profile foo]"; in ~/.aws/credentials they're "[foo]".
+func parseProfileNames(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var names []string
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "[") || !strings.HasSuffix(line, "]") {
+			continue
+		}
+		section := line[1 : len(line)-1]
+		section = strings.TrimSpace(section)
+		section = strings.TrimPrefix(section, "profile ")
+		section = strings.TrimSpace(section)
+		if section != "" {
+			names = append(names, section)
+		}
+	}
+	return names, scanner.Err()
 }
 
 // IsExpired returns true when an AWS SDK error indicates expired credentials.

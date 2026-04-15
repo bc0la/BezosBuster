@@ -247,7 +247,7 @@ func modulesCmd() *cobra.Command {
 }
 
 // steampipeCmd runs `steampipe dashboard` in the foreground against the
-// aws-insights mod. It accepts the same credential options as scan/collect
+// aws-perimeter mod. It accepts the same credential options as scan/collect
 // (single profile, profile list, or full org enumerate) and generates a
 // steampipe aws plugin connection config with one connection per detected
 // account plus an aggregator connection (aws_bb_all) that lets you query
@@ -272,6 +272,14 @@ func steampipeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+
+			// Default to all profiles when no profile flags are given.
+			if profile == "" && len(profiles) == 0 && !org {
+				all, err := creds.ListProfiles()
+				if err == nil && len(all) > 0 {
+					profiles = all
+				}
+			}
 
 			targets, err := creds.Detect(ctx, creds.Options{
 				Profile:    profile,
