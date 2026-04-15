@@ -34,7 +34,6 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/public_snapshots"
 	_ "github.com/you/bezosbuster/internal/module/scoutsuite"
 	_ "github.com/you/bezosbuster/internal/module/steampipe_perimeter"
-	_ "github.com/you/bezosbuster/internal/module/web_identity"
 )
 
 func main() {

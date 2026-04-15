@@ -6,14 +6,11 @@
 //   - IAM role trust policies: condition-aware analysis of trust policies
 //     that permit sts:AssumeRole, sts:AssumeRoleWithSAML, and especially
 //     sts:AssumeRoleWithWebIdentity. Flags missing `:aud` / `:sub`
-//     conditions, wildcard principals, and GitHub Actions OIDC subject
-//     patterns that accept untrusted repositories / branches / PRs.
+//     conditions, wildcard principals, and GitHub/GitLab/EKS OIDC subject
+//     patterns that accept untrusted repositories / branches / PRs / pods.
+//   - Cross-account sts:AssumeRole without sts:ExternalId (confused deputy).
 //   - Cognito identity pools: `AllowUnauthenticatedIdentities=true`,
-//     classic flow, and the identity of the unauthenticated role.
-//
-// This is a deliberate complement to the simpler web_identity module,
-// which only flags "role trusts AssumeRoleWithWebIdentity with no
-// condition at all". iam_integrations goes several layers deeper.
+//     classic flow, and dangerous permissions on the unauthenticated role.
 package iam_integrations
 
 import (
@@ -47,6 +44,7 @@ func (Module) Requires() []string {
 		"iam:ListSAMLProviders", "iam:GetSAMLProvider",
 		"iam:ListOpenIDConnectProviders", "iam:GetOpenIDConnectProvider",
 		"iam:ListRoles", "iam:GetRole",
+		"iam:ListAttachedRolePolicies",
 		"cognito-identity:ListIdentityPools",
 		"cognito-identity:DescribeIdentityPool",
 		"cognito-identity:GetIdentityPoolRoles",
@@ -81,14 +79,14 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	}
 
 	// Role trust policies — condition-aware review.
-	if err := scanRoleTrustPolicies(ctx, t, sink, roles, oidcProviders); err != nil {
+	if err := scanRoleTrustPolicies(ctx, icli, t, sink, roles, oidcProviders); err != nil {
 		_ = sink.LogEvent(ctx, "iam_integrations", t.AccountID, "warn", "trust policies: "+err.Error())
 	}
 
 	// Cognito identity pools (per region).
 	regions := awsapi.EnabledRegions(ctx, t.Config)
 	for _, region := range regions {
-		if err := scanCognitoIdentityPools(ctx, t, region, sink); err != nil {
+		if err := scanCognitoIdentityPools(ctx, icli, t, region, sink); err != nil {
 			_ = sink.LogEvent(ctx, "iam_integrations", t.AccountID, "warn", "cognito "+region+": "+err.Error())
 		}
 	}
@@ -114,10 +112,17 @@ func listAllRoles(ctx context.Context, cli *iam.Client) ([]iamtypes.Role, error)
 	return out, nil
 }
 
+// isServiceLinkedRole returns true for AWS-managed service-linked roles
+// whose trust policies cannot be modified.
+func isServiceLinkedRole(r iamtypes.Role) bool {
+	path := aws.ToString(r.Path)
+	return strings.HasPrefix(path, "/aws-service-role/")
+}
+
 // trustDoc is a minimal schema for an IAM role assume-role policy.
 type trustDoc struct {
-	Version   string       `json:"Version"`
-	Statement []trustStmt  `json:"Statement"`
+	Version   string      `json:"Version"`
+	Statement []trustStmt `json:"Statement"`
 }
 
 type trustStmt struct {
@@ -211,6 +216,18 @@ func condGet(c condMap, key string) (string, []string, bool) {
 		}
 	}
 	return "", nil, false
+}
+
+// isExternalAccount returns true if the principal ARN belongs to a different
+// AWS account than the one being scanned.
+func isExternalAccount(principalARN, currentAccountID string) bool {
+	// ARN format: arn:aws:iam::123456789012:root or arn:aws:iam::123456789012:role/name
+	parts := strings.Split(principalARN, ":")
+	if len(parts) < 5 {
+		return false
+	}
+	acct := parts[4]
+	return acct != "" && acct != currentAccountID
 }
 
 // ---------- SAML providers ----------
@@ -381,8 +398,11 @@ func scanOIDCProviders(ctx context.Context, cli *iam.Client, t creds.AccountTarg
 
 // ---------- role trust policy analysis ----------
 
-func scanRoleTrustPolicies(ctx context.Context, t creds.AccountTarget, sink findings.Sink, roles []iamtypes.Role, oidcProviders map[string]oidcProviderInfo) error {
+func scanRoleTrustPolicies(ctx context.Context, icli *iam.Client, t creds.AccountTarget, sink findings.Sink, roles []iamtypes.Role, oidcProviders map[string]oidcProviderInfo) error {
 	for _, r := range roles {
+		if isServiceLinkedRole(r) {
+			continue
+		}
 		td, err := parseTrustDoc(aws.ToString(r.AssumeRolePolicyDocument))
 		if err != nil {
 			continue
@@ -426,6 +446,8 @@ func scanRoleTrustPolicies(ctx context.Context, t creds.AccountTarget, sink find
 					analyzeWebIdentity(ctx, sink, t, r, st, oidcProviders)
 				case strings.EqualFold(a, "sts:AssumeRoleWithSAML"):
 					analyzeSAMLTrust(ctx, sink, t, r, st)
+				case strings.EqualFold(a, "sts:AssumeRole"):
+					analyzeAssumeRole(ctx, sink, t, r, st)
 				}
 			}
 		}
@@ -468,30 +490,140 @@ func analyzeWebIdentity(ctx context.Context, sink findings.Sink, t creds.Account
 			}
 		}
 
-		// GitHub Actions: deep :sub analysis.
-		if strings.EqualFold(issuerHost, githubOIDCIssuer) {
-			subKey := githubOIDCIssuer + ":sub"
-			subOp, subVals, hasSub := condGet(st.Condition, subKey)
-			if !hasSub {
-				_ = writeRoleFinding(ctx, sink, t, r, "github_oidc_no_sub", findings.SevCritical,
-					"GitHub Actions OIDC trust with no `"+subKey+"` condition — any GitHub repo can assume this role", st)
-			} else {
-				for _, v := range subVals {
-					risk := AnalyzeGitHubSub(subOp, v)
-					if risk.Severity == findings.SevInfo {
-						continue
-					}
-					_ = writeRoleFinding(ctx, sink, t, r, risk.Category, risk.Severity,
-						risk.Reason+" — "+risk.Suggestion, st)
-				}
-			}
-		} else {
+		// Provider-specific :sub analysis.
+		switch {
+		case strings.EqualFold(issuerHost, githubOIDCIssuer):
+			analyzeGitHubOIDCTrust(ctx, sink, t, r, st, issuerHost)
+		case strings.EqualFold(issuerHost, "gitlab.com") || strings.HasSuffix(strings.ToLower(issuerHost), ".gitlab.com"):
+			analyzeGitLabOIDCTrust(ctx, sink, t, r, st, issuerHost)
+		case strings.Contains(strings.ToLower(issuerHost), "oidc.eks.") || strings.HasSuffix(strings.ToLower(issuerHost), ".eks.amazonaws.com"):
+			analyzeEKSOIDCTrust(ctx, sink, t, r, st, issuerHost)
+		default:
 			// Generic OIDC: require :sub present.
 			subKey := issuerHost + ":sub"
 			if _, _, hasSub := condGet(st.Condition, subKey); !hasSub {
 				_ = writeRoleFinding(ctx, sink, t, r, "oidc_missing_sub", findings.SevHigh,
 					"OIDC trust for "+issuerHost+" is missing `"+subKey+"` condition", st)
 			}
+		}
+	}
+}
+
+func analyzeGitHubOIDCTrust(ctx context.Context, sink findings.Sink, t creds.AccountTarget, r iamtypes.Role, st trustStmt, issuerHost string) {
+	subKey := githubOIDCIssuer + ":sub"
+	subOp, subVals, hasSub := condGet(st.Condition, subKey)
+	if !hasSub {
+		_ = writeRoleFinding(ctx, sink, t, r, "github_oidc_no_sub", findings.SevCritical,
+			"GitHub Actions OIDC trust with no `"+subKey+"` condition — any GitHub repo can assume this role", st)
+		return
+	}
+	for _, v := range subVals {
+		risk := AnalyzeGitHubSub(subOp, v)
+		if risk.Severity == findings.SevInfo {
+			continue
+		}
+		_ = writeRoleFinding(ctx, sink, t, r, risk.Category, risk.Severity,
+			risk.Reason+" — "+risk.Suggestion, st)
+	}
+}
+
+// analyzeGitLabOIDCTrust checks GitLab CI/CD OIDC subject conditions.
+// GitLab subjects look like:
+//
+//	project_path:<group>/<project>:ref_type:branch:ref:<branch>
+//	project_path:<group>/<project>:ref_type:tag:ref:<tag>
+func analyzeGitLabOIDCTrust(ctx context.Context, sink findings.Sink, t creds.AccountTarget, r iamtypes.Role, st trustStmt, issuerHost string) {
+	subKey := issuerHost + ":sub"
+	subOp, subVals, hasSub := condGet(st.Condition, subKey)
+	if !hasSub {
+		_ = writeRoleFinding(ctx, sink, t, r, "gitlab_oidc_no_sub", findings.SevCritical,
+			"GitLab OIDC trust with no `"+subKey+"` condition — any GitLab project can assume this role", st)
+		return
+	}
+	like := strings.Contains(strings.ToLower(subOp), "like")
+	for _, v := range subVals {
+		v = strings.TrimSpace(v)
+		switch {
+		case v == "" || (like && (v == "*" || v == "project_path:*")):
+			_ = writeRoleFinding(ctx, sink, t, r, "gitlab_oidc_universal_sub", findings.SevCritical,
+				"GitLab OIDC subject is wildcarded — any GitLab project can assume this role", st)
+		case like && strings.HasPrefix(v, "project_path:") && !strings.Contains(v, "/"):
+			_ = writeRoleFinding(ctx, sink, t, r, "gitlab_oidc_no_project", findings.SevCritical,
+				"GitLab OIDC subject pins a group but no project — any project in the group can assume", st)
+		case like && strings.HasPrefix(v, "project_path:"):
+			// Check if the group or project portion is wildcarded.
+			rest := strings.TrimPrefix(v, "project_path:")
+			slash := strings.Index(rest, "/")
+			if slash >= 0 {
+				group := rest[:slash]
+				if strings.Contains(group, "*") {
+					_ = writeRoleFinding(ctx, sink, t, r, "gitlab_oidc_wildcard_group", findings.SevCritical,
+						"GitLab OIDC subject has wildcarded group — multiple groups can assume this role", st)
+				}
+			}
+		case !strings.HasPrefix(v, "project_path:"):
+			_ = writeRoleFinding(ctx, sink, t, r, "gitlab_oidc_unrecognized_sub", findings.SevHigh,
+				"GitLab OIDC subject does not start with `project_path:` — may accept unexpected subjects", st)
+		}
+	}
+}
+
+// analyzeEKSOIDCTrust checks EKS OIDC subject conditions.
+// EKS subjects look like: system:serviceaccount:<namespace>:<sa-name>
+func analyzeEKSOIDCTrust(ctx context.Context, sink findings.Sink, t creds.AccountTarget, r iamtypes.Role, st trustStmt, issuerHost string) {
+	subKey := issuerHost + ":sub"
+	subOp, subVals, hasSub := condGet(st.Condition, subKey)
+	if !hasSub {
+		_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_no_sub", findings.SevCritical,
+			"EKS OIDC trust with no `"+subKey+"` condition — any pod in the cluster can assume this role", st)
+		return
+	}
+	like := strings.Contains(strings.ToLower(subOp), "like")
+	for _, v := range subVals {
+		v = strings.TrimSpace(v)
+		switch {
+		case v == "" || (like && v == "*"):
+			_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_universal_sub", findings.SevCritical,
+				"EKS OIDC subject is wildcarded — any pod in the cluster can assume this role", st)
+		case like && v == "system:serviceaccount:*" || (like && v == "system:serviceaccount:*:*"):
+			_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_any_namespace", findings.SevHigh,
+				"EKS OIDC subject allows any namespace — any service account in the cluster can assume this role", st)
+		case strings.HasPrefix(v, "system:serviceaccount:"):
+			rest := strings.TrimPrefix(v, "system:serviceaccount:")
+			parts := strings.SplitN(rest, ":", 2)
+			ns := parts[0]
+			if like && strings.Contains(ns, "*") {
+				_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_wildcard_namespace", findings.SevHigh,
+					"EKS OIDC subject has wildcarded namespace `"+ns+"` — multiple namespaces can assume this role", st)
+			} else if len(parts) == 2 && like && parts[1] == "*" {
+				_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_any_sa", findings.SevMedium,
+					"EKS OIDC subject allows any service account in namespace `"+ns+"`", st)
+			}
+		case !strings.HasPrefix(v, "system:serviceaccount:"):
+			_ = writeRoleFinding(ctx, sink, t, r, "eks_oidc_unrecognized_sub", findings.SevHigh,
+				"EKS OIDC subject does not start with `system:serviceaccount:` — may accept unexpected subjects", st)
+		}
+	}
+}
+
+// analyzeAssumeRole checks cross-account sts:AssumeRole trusts for confused
+// deputy risk (missing sts:ExternalId condition).
+func analyzeAssumeRole(ctx context.Context, sink findings.Sink, t creds.AccountTarget, r iamtypes.Role, st trustStmt) {
+	principals := principalMap(st.Principal)
+	awsPrincs := principals["AWS"]
+	if len(awsPrincs) == 0 {
+		return
+	}
+	for _, ap := range awsPrincs {
+		if ap == "*" {
+			continue // already caught by wildcard principal check
+		}
+		if !isExternalAccount(ap, t.AccountID) {
+			continue
+		}
+		if _, _, hasExtID := condGet(st.Condition, "sts:ExternalId"); !hasExtID {
+			_ = writeRoleFinding(ctx, sink, t, r, "cross_account_no_external_id", findings.SevMedium,
+				"cross-account trust to "+ap+" without sts:ExternalId condition (confused deputy risk)", st)
 		}
 	}
 }
@@ -530,7 +662,25 @@ func worstSeverity(a, b findings.Severity) findings.Severity {
 
 // ---------- Cognito identity pools ----------
 
-func scanCognitoIdentityPools(ctx context.Context, t creds.AccountTarget, region string, sink findings.Sink) error {
+// dangerousManagedPolicies is a set of AWS-managed policy ARN suffixes that
+// grant broad or dangerous permissions when attached to an unauthenticated
+// Cognito role.
+var dangerousManagedPolicies = map[string]string{
+	"AdministratorAccess":          "full admin access",
+	"PowerUserAccess":              "full access except IAM",
+	"AmazonS3FullAccess":           "full S3 access",
+	"AmazonDynamoDBFullAccess":     "full DynamoDB access",
+	"AmazonSQSFullAccess":          "full SQS access",
+	"AmazonSNSFullAccess":          "full SNS access",
+	"IAMFullAccess":                "full IAM access",
+	"AWSLambda_FullAccess":         "full Lambda access",
+	"AmazonEC2FullAccess":          "full EC2 access",
+	"AmazonSSMFullAccess":          "full SSM access",
+	"SecretsManagerReadWrite":      "read/write Secrets Manager",
+	"AWSKeyManagementServicePowerUser": "KMS power user",
+}
+
+func scanCognitoIdentityPools(ctx context.Context, icli *iam.Client, t creds.AccountTarget, region string, sink findings.Sink) error {
 	cli := cognitoidentity.NewFromConfig(t.Config, func(o *cognitoidentity.Options) { o.Region = region })
 	var next *string
 	for {
@@ -571,6 +721,33 @@ func scanCognitoIdentityPools(ctx context.Context, t creds.AccountTarget, region
 				sev = worstSeverity(sev, findings.SevMedium)
 				reasons = append(reasons, "AllowClassicFlow=true — classic auth flow enabled (replay risk)")
 			}
+
+			// Check what the unauthenticated role can do.
+			var dangerousPolicies []string
+			if allowUnauth && unauthRole != "" {
+				roleName := unauthRole
+				// Extract role name from ARN if needed.
+				if strings.Contains(unauthRole, "/") {
+					parts := strings.SplitN(unauthRole, "/", 2)
+					roleName = parts[len(parts)-1]
+				}
+				attached, err := icli.ListAttachedRolePolicies(ctx, &iam.ListAttachedRolePoliciesInput{
+					RoleName: aws.String(roleName),
+				})
+				if err == nil {
+					for _, pol := range attached.AttachedPolicies {
+						policyName := aws.ToString(pol.PolicyName)
+						if desc, ok := dangerousManagedPolicies[policyName]; ok {
+							dangerousPolicies = append(dangerousPolicies, policyName+" ("+desc+")")
+						}
+					}
+				}
+				if len(dangerousPolicies) > 0 {
+					sev = findings.SevCritical
+					reasons = append(reasons, "unauthenticated role has dangerous policies: "+strings.Join(dangerousPolicies, ", "))
+				}
+			}
+
 			title := "Cognito identity pool " + aws.ToString(desc.IdentityPoolName) + " (" + pid + ")"
 			if len(reasons) > 0 {
 				title += " — " + strings.Join(reasons, "; ")
@@ -583,16 +760,17 @@ func scanCognitoIdentityPools(ctx context.Context, t creds.AccountTarget, region
 				ResourceARN: fmt.Sprintf("arn:aws:cognito-identity:%s:%s:identitypool/%s", region, t.AccountID, pid),
 				Title:       title,
 				Detail: map[string]any{
-					"identity_pool_id":            pid,
-					"name":                        aws.ToString(desc.IdentityPoolName),
-					"allow_unauthenticated":       allowUnauth,
-					"allow_classic_flow":          allowClassic,
-					"unauthenticated_role":        unauthRole,
-					"developer_provider_name":     aws.ToString(desc.DeveloperProviderName),
-					"cognito_identity_providers":  desc.CognitoIdentityProviders,
-					"saml_provider_arns":          desc.SamlProviderARNs,
-					"open_id_connect_provider_arns": desc.OpenIdConnectProviderARNs,
-					"reasons":                     reasons,
+					"identity_pool_id":              pid,
+					"name":                          aws.ToString(desc.IdentityPoolName),
+					"allow_unauthenticated":         allowUnauth,
+					"allow_classic_flow":             allowClassic,
+					"unauthenticated_role":           unauthRole,
+					"dangerous_policies":             dangerousPolicies,
+					"developer_provider_name":        aws.ToString(desc.DeveloperProviderName),
+					"cognito_identity_providers":     desc.CognitoIdentityProviders,
+					"saml_provider_arns":             desc.SamlProviderARNs,
+					"open_id_connect_provider_arns":  desc.OpenIdConnectProviderARNs,
+					"reasons":                        reasons,
 				},
 			})
 		}
