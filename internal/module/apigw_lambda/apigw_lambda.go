@@ -149,6 +149,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 			}
 			for _, u := range urls.FunctionUrlConfigs {
 				if u.AuthType == ltypes.FunctionUrlAuthTypeNone {
+					fnURL := aws.ToString(u.FunctionUrl)
 					_ = sink.Write(ctx, findings.Finding{
 						AccountID:   t.AccountID,
 						Region:      region,
@@ -158,9 +159,10 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						Title:       fmt.Sprintf("Lambda %s: function URL with no auth", aws.ToString(fn.FunctionName)),
 						Detail: map[string]any{
 							"function": aws.ToString(fn.FunctionName),
-							"url":      aws.ToString(u.FunctionUrl),
+							"url":      fnURL,
 							"auth":     string(u.AuthType),
 							"cors":     u.Cors,
+							"curl":     fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' '%s'", fnURL),
 						},
 					})
 				}
@@ -228,6 +230,16 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 		for _, api := range apis.Items {
 			apiID := aws.ToString(api.Id)
 			apiName := aws.ToString(api.Name)
+
+			// Fetch deployed stages so we can build invoke URLs.
+			stages, _ := acli.GetStages(ctx, &apigateway.GetStagesInput{RestApiId: api.Id})
+			var stageNames []string
+			if stages != nil {
+				for _, s := range stages.Item {
+					stageNames = append(stageNames, aws.ToString(s.StageName))
+				}
+			}
+
 			resPager := apigateway.NewGetResourcesPaginator(acli, &apigateway.GetResourcesInput{
 				RestApiId: api.Id,
 				Embed:     []string{"methods"},
@@ -242,6 +254,13 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					for httpMethod, m := range res.ResourceMethods {
 						authType := aws.ToString(m.AuthorizationType)
 						if strings.EqualFold(authType, "NONE") {
+							// Build curl commands for each deployed stage.
+							var curls []string
+							for _, stage := range stageNames {
+								url := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stage, path)
+								curl := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", httpMethod, url)
+								curls = append(curls, curl)
+							}
 							_ = sink.Write(ctx, findings.Finding{
 								AccountID:   t.AccountID,
 								Region:      region,
@@ -250,12 +269,14 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 								ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
 								Title:       fmt.Sprintf("REST API %s: %s %s has no auth", apiName, httpMethod, path),
 								Detail: map[string]any{
-									"api_id":     apiID,
-									"api_name":   apiName,
-									"method":     httpMethod,
-									"path":       path,
-									"auth_type":  authType,
+									"api_id":           apiID,
+									"api_name":         apiName,
+									"method":           httpMethod,
+									"path":             path,
+									"stages":           stageNames,
+									"auth_type":        authType,
 									"api_key_required": aws.ToBool(m.ApiKeyRequired),
+									"curl":             curls,
 								},
 							})
 						}
@@ -278,20 +299,24 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 			}
 			for _, r := range routes.Items {
 				if r.AuthorizationType == "NONE" || r.AuthorizationType == "" {
+					endpoint := aws.ToString(api.ApiEndpoint)
+					routeKey := aws.ToString(r.RouteKey)
+					curl := buildV2Curl(endpoint, routeKey)
 					_ = sink.Write(ctx, findings.Finding{
 						AccountID:   t.AccountID,
 						Region:      region,
 						Module:      "apigw_lambda",
 						Severity:    findings.SevHigh,
 						ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/apis/%s", region, apiID),
-						Title:       fmt.Sprintf("APIGWv2 %s: route %s has no auth", apiName, aws.ToString(r.RouteKey)),
+						Title:       fmt.Sprintf("APIGWv2 %s: route %s has no auth", apiName, routeKey),
 						Detail: map[string]any{
 							"api_id":    apiID,
 							"api_name":  apiName,
-							"route_key": aws.ToString(r.RouteKey),
-							"endpoint":  aws.ToString(api.ApiEndpoint),
+							"route_key": routeKey,
+							"endpoint":  endpoint,
 							"protocol":  api.ProtocolType,
 							"auth_type": string(r.AuthorizationType),
+							"curl":      curl,
 						},
 					})
 				}
@@ -300,6 +325,22 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 	}
 
 	return nil
+}
+
+// buildV2Curl turns an APIGWv2 endpoint + route key (e.g. "GET /users") into
+// a curl command. $default routes use GET against the base endpoint.
+func buildV2Curl(endpoint, routeKey string) string {
+	method := "GET"
+	path := "/"
+	if routeKey != "$default" {
+		parts := strings.SplitN(routeKey, " ", 2)
+		if len(parts) == 2 {
+			method = parts[0]
+			path = parts[1]
+		}
+	}
+	url := strings.TrimRight(endpoint, "/") + path
+	return fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", method, url)
 }
 
 func classify(anon bool, risks []WildcardRisk) string {
