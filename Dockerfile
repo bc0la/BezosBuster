@@ -47,24 +47,28 @@ RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n'
 
 # pacu wrapper for non-interactive single-module runs
 # Session "bezosbuster" is pre-created during build (see below).
-# Pipe "y" to accept the all-regions confirmation prompt.
-RUN printf '#!/bin/sh\necho y | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all\n' > /usr/local/bin/pacu-run \
- && chmod +x /usr/local/bin/pacu-run
+# Pipes "y" twice: once for regions confirmation, once for "use default creds?"
+COPY <<'PACUWRAP' /usr/local/bin/pacu-run
+#!/bin/sh
+printf 'y\ny\n' | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all -q
+PACUWRAP
+RUN chmod +x /usr/local/bin/pacu-run
 
 # powerpipe-run wrapper: manages steampipe service lifecycle around powerpipe.
 # Each invocation picks a random port so concurrent module runs don't collide.
-# Passes --database to powerpipe so it connects to the right steampipe instance.
+# Uses STEAMPIPE_DATABASE_PORT env var (works with both steampipe and powerpipe).
 COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
-#!/bin/sh
-PORT=$((19200 + ($$ % 10000)))
-steampipe service start --database-listen local --database-port "$PORT" >/dev/null 2>&1
-for i in 1 2 3 4 5 6 7 8 9 10; do
-  steampipe service status --database-port "$PORT" >/dev/null 2>&1 && break
+#!/bin/bash
+PORT=$((19200 + (RANDOM % 10000)))
+export STEAMPIPE_DATABASE_PORT=$PORT
+steampipe service start --database-listen local >/dev/null 2>&1
+for i in $(seq 1 10); do
+  (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break
   sleep 1
 done
-powerpipe "$@" --database "postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
+powerpipe "$@" --var "database=postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
 rc=$?
-steampipe service stop --database-port "$PORT" >/dev/null 2>&1
+steampipe service stop >/dev/null 2>&1
 exit $rc
 WRAPPER
 RUN chmod +x /usr/local/bin/powerpipe-run
