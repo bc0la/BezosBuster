@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/apigateway"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
+	a2types "github.com/aws/aws-sdk-go-v2/service/apigatewayv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	ltypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
@@ -64,6 +66,15 @@ func isAnonymousPrincipal(raw json.RawMessage) bool {
 	return false
 }
 
+// hasCondition returns true when the statement has a non-empty Condition block.
+func hasCondition(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "{}" && s != "null"
+}
+
 func asList(raw json.RawMessage) []string {
 	if len(raw) == 0 {
 		return nil
@@ -90,7 +101,7 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 }
 
 func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink findings.Sink) error {
-	// --- Lambda resource policies
+	// --- Lambda resource policies + function URLs
 	lcli := lambda.NewFromConfig(t.Config, func(o *lambda.Options) { o.Region = region })
 	var marker *string
 	for {
@@ -113,14 +124,21 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					continue
 				}
 				anon := isAnonymousPrincipal(st.Principal)
+				cond := hasCondition(st.Condition)
 				for _, res := range asList(st.Resource) {
 					risks := AnalyzePattern(res)
 					if len(risks) == 0 && !anon {
 						continue
 					}
 					sev := findings.SevMedium
-					if anon {
+					if anon && !cond {
 						sev = findings.SevHigh
+					} else if anon && cond {
+						sev = findings.SevMedium
+					}
+					title := classify(anon, risks)
+					if cond {
+						title += " (conditional)"
 					}
 					_ = sink.Write(ctx, findings.Finding{
 						AccountID:   t.AccountID,
@@ -128,11 +146,12 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						Module:      "apigw_lambda",
 						Severity:    sev,
 						ResourceARN: aws.ToString(fn.FunctionArn),
-						Title:       fmt.Sprintf("Lambda %s: %s", name, classify(anon, risks)),
+						Title:       fmt.Sprintf("Lambda %s: %s", name, title),
 						Detail: map[string]any{
-							"function":      name,
-							"statement":     st,
-							"anonymous":     anon,
+							"function":       name,
+							"statement":      st,
+							"anonymous":      anon,
+							"has_condition":  cond,
 							"wildcard_risks": risks,
 						},
 					})
@@ -175,63 +194,76 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 		marker = out.NextMarker
 	}
 
-	// --- API Gateway v1 REST APIs: resource policy on each API
+	// --- API Gateway v1 REST APIs (paginated)
 	acli := apigateway.NewFromConfig(t.Config, func(o *apigateway.Options) { o.Region = region })
-	apis, err := acli.GetRestApis(ctx, &apigateway.GetRestApisInput{Limit: aws.Int32(500)})
-	if err == nil {
-		for _, api := range apis.Items {
-			pol := aws.ToString(api.Policy)
-			if pol == "" {
-				continue
-			}
-			var doc resourcePolicyDoc
-			if err := json.Unmarshal([]byte(pol), &doc); err != nil {
-				continue
-			}
-			for _, st := range doc.Statement {
-				if !strings.EqualFold(st.Effect, "Allow") {
-					continue
-				}
-				anon := isAnonymousPrincipal(st.Principal)
-				for _, res := range asList(st.Resource) {
-					risks := AnalyzePattern(res)
-					if len(risks) == 0 && !anon {
-						continue
-					}
-					sev := findings.SevMedium
-					if anon && len(risks) > 0 {
-						sev = findings.SevCritical
-					} else if anon {
-						sev = findings.SevHigh
-					}
-					_ = sink.Write(ctx, findings.Finding{
-						AccountID:   t.AccountID,
-						Region:      region,
-						Module:      "apigw_lambda",
-						Severity:    sev,
-						ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, aws.ToString(api.Id)),
-						Title:       fmt.Sprintf("REST API %s: %s", aws.ToString(api.Name), classify(anon, risks)),
-						Detail: map[string]any{
-							"api_id":         aws.ToString(api.Id),
-							"api_name":       aws.ToString(api.Name),
-							"resource":       res,
-							"anonymous":      anon,
-							"wildcard_risks": risks,
-							"statement":      st,
-						},
-					})
-				}
-			}
+	apiPager := apigateway.NewGetRestApisPaginator(acli, &apigateway.GetRestApisInput{})
+	var restAPIs []apigateway.GetRestApisOutput
+	for apiPager.HasMorePages() {
+		page, err := apiPager.NextPage(ctx)
+		if err != nil {
+			break
 		}
+		restAPIs = append(restAPIs, *page)
 	}
 
-	// --- API Gateway v1: check each method for authorizationType NONE
-	if apis != nil {
-		for _, api := range apis.Items {
+	for _, page := range restAPIs {
+		for _, api := range page.Items {
 			apiID := aws.ToString(api.Id)
 			apiName := aws.ToString(api.Name)
 
-			// Fetch deployed stages so we can build invoke URLs.
+			// Resource policy analysis (URL-decode the policy first).
+			rawPol := aws.ToString(api.Policy)
+			if rawPol != "" {
+				decoded, err := url.QueryUnescape(rawPol)
+				if err != nil {
+					decoded = rawPol
+				}
+				var doc resourcePolicyDoc
+				if err := json.Unmarshal([]byte(decoded), &doc); err == nil {
+					for _, st := range doc.Statement {
+						if !strings.EqualFold(st.Effect, "Allow") {
+							continue
+						}
+						anon := isAnonymousPrincipal(st.Principal)
+						cond := hasCondition(st.Condition)
+						for _, res := range asList(st.Resource) {
+							risks := AnalyzePattern(res)
+							if len(risks) == 0 && !anon {
+								continue
+							}
+							sev := findings.SevMedium
+							if anon && !cond && len(risks) > 0 {
+								sev = findings.SevCritical
+							} else if anon && !cond {
+								sev = findings.SevHigh
+							}
+							title := classify(anon, risks)
+							if cond {
+								title += " (conditional)"
+							}
+							_ = sink.Write(ctx, findings.Finding{
+								AccountID:   t.AccountID,
+								Region:      region,
+								Module:      "apigw_lambda",
+								Severity:    sev,
+								ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
+								Title:       fmt.Sprintf("REST API %s: %s", apiName, title),
+								Detail: map[string]any{
+									"api_id":         apiID,
+									"api_name":       apiName,
+									"resource":       res,
+									"anonymous":      anon,
+									"has_condition":  cond,
+									"wildcard_risks": risks,
+									"statement":      st,
+								},
+							})
+						}
+					}
+				}
+			}
+
+			// Fetch deployed stages for curl URLs.
 			stages, _ := acli.GetStages(ctx, &apigateway.GetStagesInput{RestApiId: api.Id})
 			var stageNames []string
 			if stages != nil {
@@ -240,26 +272,28 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 				}
 			}
 
+			// Check each method for authorizationType NONE (skip OPTIONS — CORS preflight).
 			resPager := apigateway.NewGetResourcesPaginator(acli, &apigateway.GetResourcesInput{
 				RestApiId: api.Id,
 				Embed:     []string{"methods"},
 			})
 			for resPager.HasMorePages() {
-				page, err := resPager.NextPage(ctx)
+				resPage, err := resPager.NextPage(ctx)
 				if err != nil {
 					break
 				}
-				for _, res := range page.Items {
+				for _, res := range resPage.Items {
 					path := aws.ToString(res.Path)
 					for httpMethod, m := range res.ResourceMethods {
+						if strings.EqualFold(httpMethod, "OPTIONS") {
+							continue
+						}
 						authType := aws.ToString(m.AuthorizationType)
 						if strings.EqualFold(authType, "NONE") {
-							// Build curl commands for each deployed stage.
 							var curls []string
 							for _, stage := range stageNames {
-								url := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stage, path)
-								curl := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", httpMethod, url)
-								curls = append(curls, curl)
+								u := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stage, path)
+								curls = append(curls, fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", httpMethod, u))
 							}
 							_ = sink.Write(ctx, findings.Finding{
 								AccountID:   t.AccountID,
@@ -286,19 +320,34 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 		}
 	}
 
-	// --- API Gateway v2 HTTP/WebSocket APIs: check routes for auth
+	// --- API Gateway v2 HTTP/WebSocket APIs: check routes for auth (paginated)
 	a2 := apigatewayv2.NewFromConfig(t.Config, func(o *apigatewayv2.Options) { o.Region = region })
 	v2apis, err := a2.GetApis(ctx, &apigatewayv2.GetApisInput{})
 	if err == nil {
 		for _, api := range v2apis.Items {
 			apiID := aws.ToString(api.ApiId)
 			apiName := aws.ToString(api.Name)
-			routes, err := a2.GetRoutes(ctx, &apigatewayv2.GetRoutesInput{ApiId: api.ApiId})
-			if err != nil {
-				continue
+
+			// Paginate routes
+			var allRoutes []a2types.Route
+			var nextToken *string
+			for {
+				routes, err := a2.GetRoutes(ctx, &apigatewayv2.GetRoutesInput{
+					ApiId:     api.ApiId,
+					NextToken: nextToken,
+				})
+				if err != nil {
+					break
+				}
+				allRoutes = append(allRoutes, routes.Items...)
+				if routes.NextToken == nil {
+					break
+				}
+				nextToken = routes.NextToken
 			}
-			for _, r := range routes.Items {
-				if r.AuthorizationType == "NONE" || r.AuthorizationType == "" {
+
+			for _, r := range allRoutes {
+				if r.AuthorizationType == a2types.AuthorizationTypeNone || r.AuthorizationType == "" {
 					endpoint := aws.ToString(api.ApiEndpoint)
 					routeKey := aws.ToString(r.RouteKey)
 					curl := buildV2Curl(endpoint, routeKey)
@@ -339,8 +388,8 @@ func buildV2Curl(endpoint, routeKey string) string {
 			path = parts[1]
 		}
 	}
-	url := strings.TrimRight(endpoint, "/") + path
-	return fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", method, url)
+	u := strings.TrimRight(endpoint, "/") + path
+	return fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", method, u)
 }
 
 func classify(anon bool, risks []WildcardRisk) string {
