@@ -33,7 +33,6 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/public_rds"
 	_ "github.com/you/bezosbuster/internal/module/public_snapshots"
 	_ "github.com/you/bezosbuster/internal/module/scoutsuite"
-	_ "github.com/you/bezosbuster/internal/module/steampipe_insights"
 	_ "github.com/you/bezosbuster/internal/module/steampipe_perimeter"
 	_ "github.com/you/bezosbuster/internal/module/web_identity"
 )
@@ -320,7 +319,7 @@ func steampipeCmd() *cobra.Command {
 	c.Flags().BoolVar(&org, "org", false, "Auto-enumerate Organizations and assume-role into each account")
 	c.Flags().StringVar(&assumeRole, "assume-role", "OrganizationAccountAccessRole", "Role name to assume in org mode")
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
-	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-insights", "Steampipe mod location")
+	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-perimeter", "Steampipe mod location")
 	return c
 }
 

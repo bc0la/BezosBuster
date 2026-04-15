@@ -47,28 +47,23 @@ RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n'
 
 # pacu wrapper for non-interactive single-module runs
 # Session "bezosbuster" is pre-created during build (see below).
-# Pipes "y" twice: once for regions confirmation, once for "use default creds?"
+# Pipes unlimited "y" via `yes` to handle all interactive prompts.
 COPY <<'PACUWRAP' /usr/local/bin/pacu-run
 #!/bin/sh
-printf 'y\ny\n' | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all -q
+yes | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all
 PACUWRAP
 RUN chmod +x /usr/local/bin/pacu-run
 
-# powerpipe-run wrapper: manages steampipe service lifecycle around powerpipe.
-# Each invocation picks a random port so concurrent module runs don't collide.
+# powerpipe-run wrapper: ensures steampipe service is running on default
+# port (9193), then runs powerpipe. Service is left running for other modules.
 COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
 #!/bin/bash
-PORT=$((19200 + (RANDOM % 10000)))
-steampipe service start --database-listen local --database-port "$PORT" >/dev/null 2>&1
-for i in $(seq 1 10); do
-  (echo >/dev/tcp/127.0.0.1/$PORT) 2>/dev/null && break
-  sleep 1
+steampipe service start --database-listen local 2>/dev/null
+for i in $(seq 1 15); do
+  (echo >/dev/tcp/127.0.0.1/9193) 2>/dev/null && break
+  sleep 2
 done
-export POWERPIPE_DATABASE="postgres://steampipe:@127.0.0.1:${PORT}/steampipe"
 powerpipe "$@"
-rc=$?
-steampipe service stop --database-port "$PORT" >/dev/null 2>&1
-exit $rc
 WRAPPER
 RUN chmod +x /usr/local/bin/powerpipe-run
 
@@ -81,7 +76,6 @@ WORKDIR /home/bb
 # Steampipe AWS plugin + mods (must be installed by the same user that runs steampipe)
 RUN steampipe plugin install aws \
  && mkdir -p /home/bb/mods \
- && git clone --depth=1 https://github.com/turbot/steampipe-mod-aws-insights /home/bb/mods/steampipe-mod-aws-insights \
  && git clone --depth=1 https://github.com/turbot/steampipe-mod-aws-perimeter /home/bb/mods/steampipe-mod-aws-perimeter
 
 # Pre-create pacu session so the wrapper can find it at runtime
