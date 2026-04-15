@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/apigateway"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	ltypes "github.com/aws/aws-sdk-go-v2/service/lambda/types"
 
 	"github.com/you/bezosbuster/internal/awsapi"
 	"github.com/you/bezosbuster/internal/creds"
@@ -26,7 +27,7 @@ func (Module) Kind() module.Kind { return module.KindNative }
 func (Module) Requires() []string {
 	return []string{
 		"apigateway:GET", "apigatewayv2:GetApis", "apigatewayv2:GetRoutes",
-		"lambda:ListFunctions", "lambda:GetPolicy",
+		"lambda:ListFunctions", "lambda:GetPolicy", "lambda:ListFunctionUrlConfigs",
 	}
 }
 
@@ -138,6 +139,34 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 				}
 			}
 		}
+		// Check for function URLs with AuthType NONE
+		for _, fn := range out.Functions {
+			urls, err := lcli.ListFunctionUrlConfigs(ctx, &lambda.ListFunctionUrlConfigsInput{
+				FunctionName: fn.FunctionArn,
+			})
+			if err != nil || len(urls.FunctionUrlConfigs) == 0 {
+				continue
+			}
+			for _, u := range urls.FunctionUrlConfigs {
+				if u.AuthType == ltypes.FunctionUrlAuthTypeNone {
+					_ = sink.Write(ctx, findings.Finding{
+						AccountID:   t.AccountID,
+						Region:      region,
+						Module:      "apigw_lambda",
+						Severity:    findings.SevHigh,
+						ResourceARN: aws.ToString(fn.FunctionArn),
+						Title:       fmt.Sprintf("Lambda %s: function URL with no auth", aws.ToString(fn.FunctionName)),
+						Detail: map[string]any{
+							"function": aws.ToString(fn.FunctionName),
+							"url":      aws.ToString(u.FunctionUrl),
+							"auth":     string(u.AuthType),
+							"cors":     u.Cors,
+						},
+					})
+				}
+			}
+		}
+
 		if out.NextMarker == nil {
 			break
 		}
@@ -194,26 +223,79 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 		}
 	}
 
-	// --- API Gateway v2 HTTP/WebSocket APIs (no IAM resource-policy field;
-	// still list them so the report shows what's exposed)
+	// --- API Gateway v1: check each method for authorizationType NONE
+	if apis != nil {
+		for _, api := range apis.Items {
+			apiID := aws.ToString(api.Id)
+			apiName := aws.ToString(api.Name)
+			resPager := apigateway.NewGetResourcesPaginator(acli, &apigateway.GetResourcesInput{
+				RestApiId: api.Id,
+				Embed:     []string{"methods"},
+			})
+			for resPager.HasMorePages() {
+				page, err := resPager.NextPage(ctx)
+				if err != nil {
+					break
+				}
+				for _, res := range page.Items {
+					path := aws.ToString(res.Path)
+					for httpMethod, m := range res.ResourceMethods {
+						authType := aws.ToString(m.AuthorizationType)
+						if strings.EqualFold(authType, "NONE") {
+							_ = sink.Write(ctx, findings.Finding{
+								AccountID:   t.AccountID,
+								Region:      region,
+								Module:      "apigw_lambda",
+								Severity:    findings.SevHigh,
+								ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
+								Title:       fmt.Sprintf("REST API %s: %s %s has no auth", apiName, httpMethod, path),
+								Detail: map[string]any{
+									"api_id":     apiID,
+									"api_name":   apiName,
+									"method":     httpMethod,
+									"path":       path,
+									"auth_type":  authType,
+									"api_key_required": aws.ToBool(m.ApiKeyRequired),
+								},
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// --- API Gateway v2 HTTP/WebSocket APIs: check routes for auth
 	a2 := apigatewayv2.NewFromConfig(t.Config, func(o *apigatewayv2.Options) { o.Region = region })
 	v2apis, err := a2.GetApis(ctx, &apigatewayv2.GetApisInput{})
 	if err == nil {
 		for _, api := range v2apis.Items {
-			_ = sink.Write(ctx, findings.Finding{
-				AccountID:   t.AccountID,
-				Region:      region,
-				Module:      "apigw_lambda",
-				Severity:    findings.SevInfo,
-				ResourceARN: aws.ToString(api.ApiEndpoint),
-				Title:       fmt.Sprintf("APIGWv2 %s (%s)", aws.ToString(api.Name), api.ProtocolType),
-				Detail: map[string]any{
-					"api_id":      aws.ToString(api.ApiId),
-					"endpoint":    aws.ToString(api.ApiEndpoint),
-					"protocol":    api.ProtocolType,
-					"auth_types":  nil, // filled in below if we query routes
-				},
-			})
+			apiID := aws.ToString(api.ApiId)
+			apiName := aws.ToString(api.Name)
+			routes, err := a2.GetRoutes(ctx, &apigatewayv2.GetRoutesInput{ApiId: api.ApiId})
+			if err != nil {
+				continue
+			}
+			for _, r := range routes.Items {
+				if r.AuthorizationType == "NONE" || r.AuthorizationType == "" {
+					_ = sink.Write(ctx, findings.Finding{
+						AccountID:   t.AccountID,
+						Region:      region,
+						Module:      "apigw_lambda",
+						Severity:    findings.SevHigh,
+						ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/apis/%s", region, apiID),
+						Title:       fmt.Sprintf("APIGWv2 %s: route %s has no auth", apiName, aws.ToString(r.RouteKey)),
+						Detail: map[string]any{
+							"api_id":    apiID,
+							"api_name":  apiName,
+							"route_key": aws.ToString(r.RouteKey),
+							"endpoint":  aws.ToString(api.ApiEndpoint),
+							"protocol":  api.ProtocolType,
+							"auth_type": string(r.AuthorizationType),
+						},
+					})
+				}
+			}
 		}
 	}
 
