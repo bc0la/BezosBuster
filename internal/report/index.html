@@ -12,26 +12,35 @@
   nav button { background: #222; color: #eee; border: 1px solid #333; padding: 6px 12px; cursor: pointer; font: inherit; }
   nav button.active { background: #2a4d69; border-color: #3a6d99; }
   main { padding: 16px 24px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 6px 8px; border-bottom: 1px solid #222; text-align: left; vertical-align: top; }
-  th { background: #1a1a1a; position: sticky; top: 0; cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid #222; text-align: left; vertical-align: top; overflow: hidden; text-overflow: ellipsis; }
+  th { background: #1a1a1a; position: sticky; top: 0; cursor: pointer; user-select: none; }
+  th .resizer { position: absolute; right: 0; top: 0; width: 5px; height: 100%; cursor: col-resize; background: transparent; }
+  th .resizer:hover, th .resizer.active { background: #3a6d99; }
   tr:hover { background: #1a1a1a; }
+  tr.hidden-row { display: none; }
   .sev-critical { color: #ff5b5b; font-weight: bold; }
   .sev-high     { color: #ff9a3c; font-weight: bold; }
   .sev-medium   { color: #ffd166; }
   .sev-low      { color: #99d98c; }
   .sev-info     { color: #7f8bd6; }
   details { margin: 0; }
-  pre { white-space: pre-wrap; word-break: break-word; background: #0c0c0c; padding: 8px; border: 1px solid #222; }
-  .summary { display: flex; gap: 24px; margin-bottom: 16px; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #0c0c0c; padding: 8px; border: 1px solid #222; max-height: 400px; overflow: auto; }
+  .summary { display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }
   .summary div { background: #1a1a1a; padding: 8px 14px; border: 1px solid #2a2a2a; }
   input[type=search] { background: #0c0c0c; color: #eee; border: 1px solid #333; padding: 6px 8px; width: 300px; margin-bottom: 8px; }
   .curl-block { position: relative; margin: 4px 0; }
   .curl-block code { display: block; background: #0a0a0a; color: #7ec; padding: 6px 60px 6px 8px; border: 1px solid #333; font: 12px/1.4 monospace; white-space: pre-wrap; word-break: break-all; }
   .curl-block button { position: absolute; top: 4px; right: 4px; background: #333; color: #eee; border: 1px solid #555; padding: 2px 8px; cursor: pointer; font-size: 11px; }
   .curl-block button:hover { background: #555; }
-  #export-curls { background: #2a4d69; color: #eee; border: 1px solid #3a6d99; padding: 6px 14px; cursor: pointer; font: inherit; margin-left: 12px; }
-  #export-curls:hover { background: #3a6d99; }
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+  .toolbar .btn { background: #2a4d69; color: #eee; border: 1px solid #3a6d99; padding: 6px 14px; cursor: pointer; font: inherit; }
+  .toolbar .btn:hover { background: #3a6d99; }
+  .toolbar .btn-warn { background: #693a2a; border-color: #994d3a; }
+  .toolbar .btn-warn:hover { background: #994d3a; }
+  .hide-btn { background: #333; color: #999; border: 1px solid #555; padding: 1px 6px; cursor: pointer; font-size: 11px; margin-left: 4px; }
+  .hide-btn:hover { background: #555; color: #eee; }
+  .hidden-count { color: #777; font-size: 12px; margin-left: 8px; }
 </style>
 </head>
 <body>
@@ -41,12 +50,53 @@
 </header>
 <main>
   <div class="summary" id="summary"></div>
-  <input type="search" id="filter" placeholder="filter…"><button id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
+  <div class="toolbar">
+    <input type="search" id="filter" placeholder="filter...">
+    <button class="btn" id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
+    <button class="btn" id="export-raw" onclick="exportRaw()" style="display:none">Export JSON</button>
+    <button class="btn btn-warn" id="restore-hidden" onclick="restoreHidden()" style="display:none">Restore hidden</button>
+    <span class="hidden-count" id="hidden-count"></span>
+  </div>
   <div id="content"></div>
 </main>
 <script>
 let currentModule = "";
 let allFindings = [];
+
+// Hidden findings stored in localStorage keyed by finding ID.
+const HIDDEN_KEY = 'bb_hidden_findings';
+function getHidden() {
+  try { return JSON.parse(localStorage.getItem(HIDDEN_KEY) || '{}'); } catch { return {}; }
+}
+function setHidden(h) { localStorage.setItem(HIDDEN_KEY, JSON.stringify(h)); }
+function hideFinding(id) {
+  const h = getHidden(); h[id] = true; setHidden(h);
+  const row = document.getElementById('row-' + id);
+  if (row) row.classList.add('hidden-row');
+  updateHiddenUI();
+}
+function restoreHidden() {
+  if (!currentModule) { const h = getHidden(); for (const k in h) delete h[k]; setHidden(h); }
+  else {
+    const h = getHidden();
+    for (const f of allFindings) { if (f.module === currentModule || !currentModule) delete h[f.id]; }
+    setHidden(h);
+  }
+  render();
+}
+function updateHiddenUI() {
+  const h = getHidden();
+  const relevant = allFindings.filter(f => h[f.id]);
+  const countEl = document.getElementById('hidden-count');
+  const restoreEl = document.getElementById('restore-hidden');
+  if (relevant.length > 0) {
+    countEl.textContent = relevant.length + ' hidden';
+    restoreEl.style.display = '';
+  } else {
+    countEl.textContent = '';
+    restoreEl.style.display = 'none';
+  }
+}
 
 async function loadSummary() {
   const r = await fetch('/api/summary').then(r => r.json());
@@ -82,44 +132,179 @@ async function loadFindings() {
   allFindings = await fetch('/api/findings' + qs).then(r => r.json()) || [];
   document.getElementById('export-curls').style.display =
     ['apigw_lambda', 'public_sqs', 'public_sns'].includes(currentModule) ? '' : 'none';
+  document.getElementById('export-raw').style.display = currentModule ? '' : 'none';
   render();
 }
 
 function render() {
   const filter = document.getElementById('filter').value.toLowerCase();
+  const hidden = getHidden();
   const rows = allFindings.filter(f => !filter || JSON.stringify(f).toLowerCase().includes(filter));
   const content = document.getElementById('content');
-  if (rows.length === 0) { content.textContent = 'no findings'; return; }
-  const h = ['<table><thead><tr><th>severity</th><th>account</th><th>region</th><th>module</th><th>title</th><th>resource</th><th>raw</th><th>detail</th></tr></thead><tbody>'];
+  if (rows.length === 0) { content.textContent = 'no findings'; updateHiddenUI(); return; }
+
+  // Build table via DocumentFragment for performance.
+  const tbl = document.createElement('table');
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  const cols = [
+    {name: '', width: 30},
+    {name: 'severity', width: 80},
+    {name: 'account', width: 110},
+    {name: 'region', width: 120},
+    {name: 'module', width: 130},
+    {name: 'title', width: 400},
+    {name: 'resource', width: 250},
+    {name: 'raw', width: 50},
+    {name: 'detail', width: 80}
+  ];
+  cols.forEach((col, ci) => {
+    const th = document.createElement('th');
+    th.textContent = col.name;
+    th.style.width = col.width + 'px';
+    th.style.position = 'relative';
+    // Resizer handle.
+    const resizer = document.createElement('div');
+    resizer.className = 'resizer';
+    let startX, startW;
+    resizer.addEventListener('mousedown', e => {
+      e.preventDefault();
+      startX = e.pageX; startW = th.offsetWidth;
+      resizer.classList.add('active');
+      const onMove = e2 => { th.style.width = Math.max(30, startW + e2.pageX - startX) + 'px'; };
+      const onUp = () => { resizer.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    th.appendChild(resizer);
+    headerRow.appendChild(th);
+  });
+  thead.appendChild(headerRow);
+  tbl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const frag = document.createDocumentFragment();
   for (const f of rows) {
-    const raw = f.raw_output_path ? `<a href="${f.raw_output_path}" target="_blank">browse</a>` : '';
-    let curlHTML = '';
+    const tr = document.createElement('tr');
+    tr.id = 'row-' + f.id;
+    if (hidden[f.id]) tr.classList.add('hidden-row');
+
+    // Hide button cell.
+    const hideCell = document.createElement('td');
+    const hideBtn = document.createElement('button');
+    hideBtn.className = 'hide-btn';
+    hideBtn.textContent = 'x';
+    hideBtn.title = 'Hide this finding';
+    hideBtn.onclick = () => hideFinding(f.id);
+    hideCell.appendChild(hideBtn);
+    tr.appendChild(hideCell);
+
+    // Severity.
+    const sevCell = document.createElement('td');
+    sevCell.className = 'sev-' + f.severity;
+    sevCell.textContent = f.severity;
+    tr.appendChild(sevCell);
+
+    // Account.
+    const acctCell = document.createElement('td');
+    acctCell.textContent = f.account_id;
+    tr.appendChild(acctCell);
+
+    // Region.
+    const regCell = document.createElement('td');
+    regCell.textContent = f.region;
+    tr.appendChild(regCell);
+
+    // Module.
+    const modCell = document.createElement('td');
+    modCell.textContent = f.module;
+    tr.appendChild(modCell);
+
+    // Title + curls.
+    const titleCell = document.createElement('td');
+    titleCell.textContent = f.title;
     if (f.detail && f.detail.curl) {
       const curls = Array.isArray(f.detail.curl) ? f.detail.curl : [f.detail.curl];
-      curlHTML = curls.map(c => `<div class="curl-block"><code>${escape(c)}</code><button onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{this.textContent='copied!';setTimeout(()=>this.textContent='copy',1500)})">copy</button></div>`).join('');
+      for (const c of curls) {
+        const block = document.createElement('div');
+        block.className = 'curl-block';
+        const code = document.createElement('code');
+        code.textContent = c;
+        block.appendChild(code);
+        const btn = document.createElement('button');
+        btn.textContent = 'copy';
+        btn.onclick = () => navigator.clipboard.writeText(c).then(() => { btn.textContent = 'copied!'; setTimeout(() => btn.textContent = 'copy', 1500); });
+        block.appendChild(btn);
+        titleCell.appendChild(block);
+      }
     }
-    h.push(`<tr><td class="sev-${f.severity}">${f.severity}</td><td>${f.account_id}</td><td>${f.region}</td><td>${f.module}</td><td>${escape(f.title)}${curlHTML}</td><td>${escape(f.resource_arn)}</td><td>${raw}</td><td><details><summary>show</summary><pre>${escape(JSON.stringify(f.detail, null, 2))}</pre></details></td></tr>`);
-  }
-  h.push('</tbody></table>');
-  content.innerHTML = h.join('');
-}
+    tr.appendChild(titleCell);
 
-function escape(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+    // Resource.
+    const resCell = document.createElement('td');
+    resCell.textContent = f.resource_arn || '';
+    tr.appendChild(resCell);
+
+    // Raw.
+    const rawCell = document.createElement('td');
+    if (f.raw_output_path) {
+      const a = document.createElement('a');
+      a.href = f.raw_output_path;
+      a.target = '_blank';
+      a.textContent = 'browse';
+      rawCell.appendChild(a);
+    }
+    tr.appendChild(rawCell);
+
+    // Detail.
+    const detCell = document.createElement('td');
+    const det = document.createElement('details');
+    const sum = document.createElement('summary');
+    sum.textContent = 'show';
+    det.appendChild(sum);
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(f.detail, null, 2);
+    det.appendChild(pre);
+    detCell.appendChild(det);
+    tr.appendChild(detCell);
+
+    frag.appendChild(tr);
+  }
+  tbody.appendChild(frag);
+  tbl.appendChild(tbody);
+  content.innerHTML = '';
+  content.appendChild(tbl);
+  updateHiddenUI();
+}
 
 function exportCurls() {
   const lines = [];
+  const hidden = getHidden();
   for (const f of allFindings) {
+    if (hidden[f.id]) continue;
     if (!f.detail || !f.detail.curl) continue;
     const curls = Array.isArray(f.detail.curl) ? f.detail.curl : [f.detail.curl];
     lines.push('# ' + f.title + ' [' + f.severity + '] ' + f.account_id + ' ' + f.region);
     for (const c of curls) lines.push(c);
     lines.push('');
   }
-  if (lines.length === 0) { alert('No curl commands found in current findings.'); return; }
+  if (lines.length === 0) { alert('No curl commands found in visible findings.'); return; }
   const blob = new Blob([lines.join('\n')], {type: 'text/plain'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'bezosbuster-curls.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function exportRaw() {
+  const hidden = getHidden();
+  const data = allFindings.filter(f => !hidden[f.id]);
+  if (data.length === 0) { alert('No visible findings to export.'); return; }
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bezosbuster-' + (currentModule || 'all') + '.json';
   a.click();
   URL.revokeObjectURL(a.href);
 }
