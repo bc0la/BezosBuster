@@ -101,13 +101,18 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	return nil
 }
 
-// apiKeyIndex maps "apiID/stageName" → list of API key values for quick lookup.
-type apiKeyIndex map[string][]string
+// apiKeyStore holds all enabled API key values for a region, indexed by
+// stage association and also as a flat list for fallback.
+type apiKeyStore struct {
+	byStage map[string][]string // "apiID/stageName" → key values
+	all     []string            // all enabled key values (fallback)
+}
 
-// buildAPIKeyIndex fetches all API keys (with values) for a region and indexes
-// them by their stage associations.
-func buildAPIKeyIndex(ctx context.Context, acli *apigateway.Client) apiKeyIndex {
-	idx := apiKeyIndex{}
+// buildAPIKeyStore fetches all API keys (with values) for a region.
+// Keys are indexed by their stage associations, with a flat fallback list
+// for keys not explicitly linked to a usage plan.
+func buildAPIKeyStore(ctx context.Context, acli *apigateway.Client) apiKeyStore {
+	store := apiKeyStore{byStage: map[string][]string{}}
 	pager := apigateway.NewGetApiKeysPaginator(acli, &apigateway.GetApiKeysInput{
 		IncludeValues: aws.Bool(true),
 	})
@@ -124,13 +129,25 @@ func buildAPIKeyIndex(ctx context.Context, acli *apigateway.Client) apiKeyIndex 
 			if val == "" {
 				continue
 			}
+			store.all = append(store.all, val)
 			for _, sk := range k.StageKeys {
-				// StageKeys are in the format "apiId/stageName"
-				idx[sk] = append(idx[sk], val)
+				store.byStage[sk] = append(store.byStage[sk], val)
 			}
 		}
 	}
-	return idx
+	return store
+}
+
+// keyFor returns the best API key for a given API/stage combo.
+// Prefers a stage-associated key, falls back to any enabled key.
+func (s apiKeyStore) keyFor(apiID, stageName string) string {
+	if keys := s.byStage[apiID+"/"+stageName]; len(keys) > 0 {
+		return keys[0]
+	}
+	if len(s.all) > 0 {
+		return s.all[0]
+	}
+	return ""
 }
 
 func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink findings.Sink) error {
@@ -230,8 +247,8 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 	// --- API Gateway v1 REST APIs (paginated)
 	acli := apigateway.NewFromConfig(t.Config, func(o *apigateway.Options) { o.Region = region })
 
-	// Build API key index for the region (all keys across all APIs).
-	keyIdx := buildAPIKeyIndex(ctx, acli)
+	// Build API key store for the region (all keys across all APIs).
+	keyStore := buildAPIKeyStore(ctx, acli)
 
 	apiPager := apigateway.NewGetRestApisPaginator(acli, &apigateway.GetRestApisInput{})
 	var restAPIs []apigateway.GetRestApisOutput
@@ -338,9 +355,8 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 								u := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stageName, path)
 								curl := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s", httpMethod)
 								if needsKey {
-									stageKey := apiID + "/" + stageName
-									if keys := keyIdx[stageKey]; len(keys) > 0 {
-										curl += fmt.Sprintf(" -H 'x-api-key: %s'", keys[0])
+									if key := keyStore.keyFor(apiID, stageName); key != "" {
+										curl += fmt.Sprintf(" -H 'x-api-key: %s'", key)
 									} else {
 										curl += " -H 'x-api-key: <KEY_REQUIRED>'"
 									}
