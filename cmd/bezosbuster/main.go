@@ -34,6 +34,7 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/public_ecr"
 	_ "github.com/you/bezosbuster/internal/module/public_rds"
 	_ "github.com/you/bezosbuster/internal/module/public_snapshots"
+	_ "github.com/you/bezosbuster/internal/module/public_sns"
 	_ "github.com/you/bezosbuster/internal/module/public_sqs"
 	_ "github.com/you/bezosbuster/internal/module/scoutsuite"
 	_ "github.com/you/bezosbuster/internal/module/ssm_commands"

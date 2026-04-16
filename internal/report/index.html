@@ -81,7 +81,7 @@ async function loadFindings() {
   const qs = currentModule ? `?module=${encodeURIComponent(currentModule)}` : '';
   allFindings = await fetch('/api/findings' + qs).then(r => r.json()) || [];
   document.getElementById('export-curls').style.display =
-    (currentModule === 'apigw_lambda' || currentModule === 'public_sqs') ? '' : 'none';
+    ['apigw_lambda', 'public_sqs', 'public_sns'].includes(currentModule) ? '' : 'none';
   render();
 }
 

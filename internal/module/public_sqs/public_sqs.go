@@ -146,7 +146,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					switch {
 					case strings.Contains(a, "ReceiveMessage") || a == "sqs:*" || a == "SQS:*":
 						cliCmds = append(cliCmds,
-							fmt.Sprintf("aws sqs receive-message --queue-url '%s' --max-number-of-messages 10 --region %s", queueURL, region))
+							fmt.Sprintf("aws sqs receive-message --queue-url '%s' --max-number-of-messages 10 --wait-time-seconds 20 --region %s", queueURL, region))
 					case strings.Contains(a, "SendMessage"):
 						cliCmds = append(cliCmds,
 							fmt.Sprintf("aws sqs send-message --queue-url '%s' --message-body 'test' --region %s", queueURL, region))
@@ -158,7 +158,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 				// Always include a receive command for wildcard actions.
 				if len(cliCmds) == 0 {
 					cliCmds = append(cliCmds,
-						fmt.Sprintf("aws sqs receive-message --queue-url '%s' --max-number-of-messages 10 --region %s", queueURL, region))
+						fmt.Sprintf("aws sqs receive-message --queue-url '%s' --max-number-of-messages 10 --wait-time-seconds 20 --region %s", queueURL, region))
 				}
 
 				_ = sink.Write(ctx, findings.Finding{
