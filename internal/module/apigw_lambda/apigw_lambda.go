@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/apigateway"
+	agtypes "github.com/aws/aws-sdk-go-v2/service/apigateway/types"
 	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
 	a2types "github.com/aws/aws-sdk-go-v2/service/apigatewayv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
@@ -98,6 +99,38 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 		}
 	}
 	return nil
+}
+
+// apiKeyIndex maps "apiID/stageName" → list of API key values for quick lookup.
+type apiKeyIndex map[string][]string
+
+// buildAPIKeyIndex fetches all API keys (with values) for a region and indexes
+// them by their stage associations.
+func buildAPIKeyIndex(ctx context.Context, acli *apigateway.Client) apiKeyIndex {
+	idx := apiKeyIndex{}
+	pager := apigateway.NewGetApiKeysPaginator(acli, &apigateway.GetApiKeysInput{
+		IncludeValues: aws.Bool(true),
+	})
+	for pager.HasMorePages() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			break
+		}
+		for _, k := range page.Items {
+			if !k.Enabled {
+				continue
+			}
+			val := aws.ToString(k.Value)
+			if val == "" {
+				continue
+			}
+			for _, sk := range k.StageKeys {
+				// StageKeys are in the format "apiId/stageName"
+				idx[sk] = append(idx[sk], val)
+			}
+		}
+	}
+	return idx
 }
 
 func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink findings.Sink) error {
@@ -196,6 +229,10 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 
 	// --- API Gateway v1 REST APIs (paginated)
 	acli := apigateway.NewFromConfig(t.Config, func(o *apigateway.Options) { o.Region = region })
+
+	// Build API key index for the region (all keys across all APIs).
+	keyIdx := buildAPIKeyIndex(ctx, acli)
+
 	apiPager := apigateway.NewGetRestApisPaginator(acli, &apigateway.GetRestApisInput{})
 	var restAPIs []apigateway.GetRestApisOutput
 	for apiPager.HasMorePages() {
@@ -263,12 +300,14 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 				}
 			}
 
-			// Fetch deployed stages for curl URLs.
+			// Fetch deployed stages — only include stages with an active deployment.
 			stages, _ := acli.GetStages(ctx, &apigateway.GetStagesInput{RestApiId: api.Id})
-			var stageNames []string
+			var deployedStages []agtypes.Stage
 			if stages != nil {
 				for _, s := range stages.Item {
-					stageNames = append(stageNames, aws.ToString(s.StageName))
+					if aws.ToString(s.DeploymentId) != "" {
+						deployedStages = append(deployedStages, s)
+					}
 				}
 			}
 
@@ -290,10 +329,24 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						}
 						authType := aws.ToString(m.AuthorizationType)
 						if strings.EqualFold(authType, "NONE") {
+							needsKey := aws.ToBool(m.ApiKeyRequired)
 							var curls []string
-							for _, stage := range stageNames {
-								u := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stage, path)
-								curls = append(curls, fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s '%s'", httpMethod, u))
+							var stageNames []string
+							for _, stage := range deployedStages {
+								stageName := aws.ToString(stage.StageName)
+								stageNames = append(stageNames, stageName)
+								u := fmt.Sprintf("https://%s.execute-api.%s.amazonaws.com/%s%s", apiID, region, stageName, path)
+								curl := fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' -X %s", httpMethod)
+								if needsKey {
+									stageKey := apiID + "/" + stageName
+									if keys := keyIdx[stageKey]; len(keys) > 0 {
+										curl += fmt.Sprintf(" -H 'x-api-key: %s'", keys[0])
+									} else {
+										curl += " -H 'x-api-key: <KEY_REQUIRED>'"
+									}
+								}
+								curl += fmt.Sprintf(" '%s'", u)
+								curls = append(curls, curl)
 							}
 							_ = sink.Write(ctx, findings.Finding{
 								AccountID:   t.AccountID,
@@ -309,7 +362,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 									"path":             path,
 									"stages":           stageNames,
 									"auth_type":        authType,
-									"api_key_required": aws.ToBool(m.ApiKeyRequired),
+									"api_key_required": needsKey,
 									"curl":             curls,
 								},
 							})

@@ -30,6 +30,8 @@
   .curl-block code { display: block; background: #0a0a0a; color: #7ec; padding: 6px 60px 6px 8px; border: 1px solid #333; font: 12px/1.4 monospace; white-space: pre-wrap; word-break: break-all; }
   .curl-block button { position: absolute; top: 4px; right: 4px; background: #333; color: #eee; border: 1px solid #555; padding: 2px 8px; cursor: pointer; font-size: 11px; }
   .curl-block button:hover { background: #555; }
+  #export-curls { background: #2a4d69; color: #eee; border: 1px solid #3a6d99; padding: 6px 14px; cursor: pointer; font: inherit; margin-left: 12px; }
+  #export-curls:hover { background: #3a6d99; }
 </style>
 </head>
 <body>
@@ -39,7 +41,7 @@
 </header>
 <main>
   <div class="summary" id="summary"></div>
-  <input type="search" id="filter" placeholder="filter…">
+  <input type="search" id="filter" placeholder="filter…"><button id="export-curls" onclick="exportCurls()">Export curls</button>
   <div id="content"></div>
 </main>
 <script>
@@ -101,6 +103,24 @@ function render() {
 }
 
 function escape(s) { return String(s == null ? '' : s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function exportCurls() {
+  const lines = [];
+  for (const f of allFindings) {
+    if (!f.detail || !f.detail.curl) continue;
+    const curls = Array.isArray(f.detail.curl) ? f.detail.curl : [f.detail.curl];
+    lines.push('# ' + f.title + ' [' + f.severity + '] ' + f.account_id + ' ' + f.region);
+    for (const c of curls) lines.push(c);
+    lines.push('');
+  }
+  if (lines.length === 0) { alert('No curl commands found in current findings.'); return; }
+  const blob = new Blob([lines.join('\n')], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bezosbuster-curls.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 
 document.getElementById('filter').addEventListener('input', render);
 loadSummary().then(loadFindings);
