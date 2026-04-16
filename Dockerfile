@@ -34,6 +34,17 @@ RUN curl -fsSL https://powerpipe.io/install/powerpipe.sh -o /tmp/powerpipe.sh \
  && bash /tmp/powerpipe.sh \
  && rm /tmp/powerpipe.sh
 
+# Kingfisher secret scanner (latest release binary)
+RUN set -eux; \
+    SUFFIX="linux-x64.tgz"; \
+    LATEST_URL=$(curl -fsSL https://api.github.com/repos/mongodb/kingfisher/releases/latest \
+        | grep -Eo "https://[^\"]*${SUFFIX}"); \
+    curl -fsSL "$LATEST_URL" -o /tmp/kingfisher.tgz; \
+    cd /tmp && tar -xzf kingfisher.tgz; \
+    KF_PATH=$(find /tmp -type f -name 'kingfisher*' -executable -print -quit); \
+    mv "$KF_PATH" /usr/local/bin/kingfisher; \
+    rm -rf /tmp/kingfisher*
+
 # Blue-CloudPEASS clone (as root, world-readable) + install all Python deps
 RUN git clone --depth=1 https://github.com/peass-ng/Blue-CloudPEASS /opt/Blue-CloudPEASS \
  && find /opt/Blue-CloudPEASS -type f -name '*.py' -exec chmod +x {} \; \
