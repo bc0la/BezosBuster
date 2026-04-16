@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/apigatewayv2 v1.34.1
 	github.com/aws/aws-sdk-go-v2/service/codebuild v1.68.13
 	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.33.22
+	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.60.0
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.297.0
 	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.38.13
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.78.0
