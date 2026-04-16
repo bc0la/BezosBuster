@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/you/bezosbuster/internal/engagement"
+	"github.com/you/bezosbuster/internal/module"
 
 	_ "modernc.org/sqlite"
 )
@@ -114,19 +116,36 @@ type summaryRow struct {
 }
 
 func summary(db *sql.DB) (map[string]any, error) {
+	// Get counts from DB.
+	dbCounts := map[string]int{}
 	rows, err := db.Query(`SELECT module, count(*) FROM findings GROUP BY module ORDER BY module`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var byMod []summaryRow
 	for rows.Next() {
-		var r summaryRow
-		if err := rows.Scan(&r.Module, &r.Count); err != nil {
+		var mod string
+		var count int
+		if err := rows.Scan(&mod, &count); err != nil {
 			return nil, err
 		}
-		byMod = append(byMod, r)
+		dbCounts[mod] = count
 	}
+
+	// Merge with all registered modules so empty ones still show up.
+	seen := map[string]bool{}
+	var byMod []summaryRow
+	for name, count := range dbCounts {
+		byMod = append(byMod, summaryRow{Module: name, Count: count})
+		seen[name] = true
+	}
+	for _, m := range module.All() {
+		if !seen[m.Name()] {
+			byMod = append(byMod, summaryRow{Module: m.Name(), Count: 0})
+		}
+	}
+	sort.Slice(byMod, func(i, j int) bool { return byMod[i].Module < byMod[j].Module })
+
 	sevRows, err := db.Query(`SELECT severity, count(*) FROM findings GROUP BY severity`)
 	if err != nil {
 		return nil, err

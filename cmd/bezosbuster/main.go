@@ -24,6 +24,8 @@ import (
 	// Side-effect imports to register modules.
 	_ "github.com/you/bezosbuster/internal/module/apigw_lambda"
 	_ "github.com/you/bezosbuster/internal/module/bluecloudpeass"
+	_ "github.com/you/bezosbuster/internal/module/codebuild_env"
+	_ "github.com/you/bezosbuster/internal/module/ec2_userdata"
 	_ "github.com/you/bezosbuster/internal/module/ecs_ecr_taskdefs"
 	_ "github.com/you/bezosbuster/internal/module/iam_integrations"
 	_ "github.com/you/bezosbuster/internal/module/lambda_env"
@@ -32,6 +34,7 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/public_ecr"
 	_ "github.com/you/bezosbuster/internal/module/public_rds"
 	_ "github.com/you/bezosbuster/internal/module/public_snapshots"
+	_ "github.com/you/bezosbuster/internal/module/public_sqs"
 	_ "github.com/you/bezosbuster/internal/module/scoutsuite"
 	_ "github.com/you/bezosbuster/internal/module/ssm_commands"
 	_ "github.com/you/bezosbuster/internal/module/steampipe_perimeter"

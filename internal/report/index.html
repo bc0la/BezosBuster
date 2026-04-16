@@ -41,7 +41,7 @@
 </header>
 <main>
   <div class="summary" id="summary"></div>
-  <input type="search" id="filter" placeholder="filter…"><button id="export-curls" onclick="exportCurls()">Export curls</button>
+  <input type="search" id="filter" placeholder="filter…"><button id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
   <div id="content"></div>
 </main>
 <script>
@@ -80,6 +80,8 @@ function renderTabs() {
 async function loadFindings() {
   const qs = currentModule ? `?module=${encodeURIComponent(currentModule)}` : '';
   allFindings = await fetch('/api/findings' + qs).then(r => r.json()) || [];
+  document.getElementById('export-curls').style.display =
+    (currentModule === 'apigw_lambda' || currentModule === 'public_sqs') ? '' : 'none';
   render();
 }
 
