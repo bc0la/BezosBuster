@@ -224,17 +224,30 @@ func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarge
 	// plus the envelope). Use a streaming decoder to consume them all.
 	var all []kfFinding
 	dec := json.NewDecoder(bytes.NewReader(out))
+	docIdx := 0
 	for dec.More() {
 		var report kfReport
 		if err := dec.Decode(&report); err != nil {
+			// Log head of what was left so we can see what kingfisher really outputs.
+			off := int(dec.InputOffset())
+			snippet := ""
+			if off < len(out) {
+				end := off + 200
+				if end > len(out) {
+					end = len(out)
+				}
+				snippet = string(out[off:end])
+			}
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-				fmt.Sprintf("kingfisher JSON decode error: %s (total output %d bytes)", err.Error(), len(out)))
+				fmt.Sprintf("kingfisher JSON decode error at doc %d offset %d: %s — next bytes: %q",
+					docIdx, off, err.Error(), snippet))
 			break
 		}
 		all = append(all, report.Findings...)
+		docIdx++
 	}
 	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-		fmt.Sprintf("kingfisher found %d findings", len(all)))
+		fmt.Sprintf("kingfisher found %d findings across %d JSON doc(s), %d total bytes", len(all), docIdx, len(out)))
 	return all
 }
 
