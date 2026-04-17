@@ -507,7 +507,9 @@ func collectAPIGWStageVars(ctx context.Context, t creds.AccountTarget, regions [
 // --- S3 per-bucket scan with cleanup ---
 
 func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, sink findings.Sink) {
-	s3Cli := s3.NewFromConfig(t.Config)
+	s3Cli := s3.NewFromConfig(t.Config, func(o *s3.Options) {
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+	})
 	buckets, err := s3Cli.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
 		return
@@ -522,7 +524,10 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 		if bucketRegion == "" {
 			bucketRegion = "us-east-1"
 		}
-		regionCli := s3.NewFromConfig(t.Config, func(o *s3.Options) { o.Region = bucketRegion })
+		regionCli := s3.NewFromConfig(t.Config, func(o *s3.Options) {
+			o.Region = bucketRegion
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+		})
 
 		// Create temp dir per bucket, scan, then clean up.
 		tmpDir, err := os.MkdirTemp("", "bb-s3-*")
