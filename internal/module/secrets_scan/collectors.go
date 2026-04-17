@@ -604,7 +604,7 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 		if fileIdx > 0 {
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
 				fmt.Sprintf("S3: scanning %d files from %s with kingfisher", fileIdx, bName))
-			kfFindings := runKingfisher(ctx, kfPath, tmpDir, t, sink)
+			kfFindings := runKingfisher(ctx, kfPath, tmpDir, "s3_"+bName, t, sink)
 			emitFindings(kfFindings, fileMap, t, sink)
 		}
 

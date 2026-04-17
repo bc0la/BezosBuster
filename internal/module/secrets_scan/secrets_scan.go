@@ -195,11 +195,29 @@ func scanSamples(ctx context.Context, kfPath string, samples []sample, t creds.A
 		fileMap[fname] = s
 	}
 
-	kfFindings := runKingfisher(ctx, kfPath, tmpDir, t, sink)
+	kfFindings := runKingfisher(ctx, kfPath, tmpDir, "non_s3", t, sink)
 	emitFindings(kfFindings, fileMap, t, sink)
 }
 
-func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarget, sink findings.Sink) []kfFinding {
+// saveRawOutput writes kingfisher's raw output to
+// <engagement>/secrets_scan/<account>/<phase>.json.
+func saveRawOutput(phase string, out []byte, t creds.AccountTarget, sink findings.Sink) {
+	rawDir, err := sink.RawDir("secrets_scan", t.AccountID)
+	if err != nil {
+		return
+	}
+	// Sanitize phase for filesystem (bucket names may contain dots, etc).
+	safe := strings.Map(func(r rune) rune {
+		if r == '/' || r == '\\' || r == ':' {
+			return '_'
+		}
+		return r
+	}, phase)
+	path := filepath.Join(rawDir, safe+".json")
+	_ = os.WriteFile(path, out, 0600)
+}
+
+func runKingfisher(ctx context.Context, kfPath, dir, phase string, t creds.AccountTarget, sink findings.Sink) []kfFinding {
 	cmd := exec.CommandContext(ctx, kfPath, "scan", dir,
 		"--format", "json",
 		"--git-history", "none",
@@ -218,6 +236,11 @@ func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarge
 		} else {
 			return nil
 		}
+	}
+
+	// Save raw kingfisher output for auditing.
+	if len(out) > 0 {
+		saveRawOutput(phase, out, t, sink)
 	}
 
 	// Kingfisher may emit multiple JSON documents (e.g., progress banner
