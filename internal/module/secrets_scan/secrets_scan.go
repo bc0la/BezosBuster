@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/you/bezosbuster/internal/awsapi"
 	"github.com/you/bezosbuster/internal/creds"
@@ -132,6 +133,12 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	var wg sync.WaitGroup
 	var doneCount int32
 
+	// Optional per-collector timeout from context.
+	var timeoutMins int
+	if v, ok := ctx.Value("bb.secrets_collector_timeout_mins").(int); ok {
+		timeoutMins = v
+	}
+
 	for _, c := range collectors {
 		c := c
 		wg.Add(1)
@@ -139,15 +146,28 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			defer wg.Done()
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
 				fmt.Sprintf("collecting: %s", c.name))
-			samples := c.fn(ctx, t, regions)
+
+			collectCtx := ctx
+			var cancel context.CancelFunc
+			if timeoutMins > 0 {
+				collectCtx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMins)*time.Minute)
+				defer cancel()
+			}
+
+			samples := c.fn(collectCtx, t, regions)
 			mu.Lock()
 			allSamples = append(allSamples, samples...)
 			doneCount++
 			done := doneCount
 			total := int32(len(collectors))
 			mu.Unlock()
+			timedOut := ""
+			if collectCtx.Err() == context.DeadlineExceeded {
+				timedOut = " (timed out — partial results kept)"
+			}
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-				fmt.Sprintf("collected %d samples from %s (%d/%d collectors done)", len(samples), c.name, done, total))
+				fmt.Sprintf("collected %d samples from %s (%d/%d collectors done)%s",
+					len(samples), c.name, done, total, timedOut))
 		}()
 	}
 	wg.Wait()

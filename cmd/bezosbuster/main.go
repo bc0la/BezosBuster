@@ -72,8 +72,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 		engDir     string
 		moduleList []string
 		noTUI      bool
-		noSecrets  bool
-		noS3       bool
+		noSecrets          bool
+		noS3               bool
+		secretsTimeoutMins int
 	)
 	c := &cobra.Command{
 		Use:   use,
@@ -138,6 +139,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 			if noS3 {
 				ctx = context.WithValue(ctx, "bb.no_s3", true)
 			}
+			if secretsTimeoutMins > 0 {
+				ctx = context.WithValue(ctx, "bb.secrets_collector_timeout_mins", secretsTimeoutMins)
+			}
 			return runEngagement(ctx, eng, targets, modules, nil, noTUI)
 		},
 	}
@@ -152,6 +156,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
 	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
 	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
+	c.Flags().IntVar(&secretsTimeoutMins, "secrets-timeout", 0, "Per-collector timeout in minutes for secrets_scan (0 = disabled). Partial results are kept.")
 	return c
 }
 
