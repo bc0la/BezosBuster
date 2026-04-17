@@ -3,6 +3,7 @@
 package secrets_scan
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -219,17 +220,22 @@ func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarge
 		}
 	}
 
-	var report kfReport
-	if err := json.Unmarshal(out, &report); err != nil {
-		if err2 := json.Unmarshal(out, &report.Findings); err2 != nil {
+	// Kingfisher may emit multiple JSON documents (e.g., progress banner
+	// plus the envelope). Use a streaming decoder to consume them all.
+	var all []kfFinding
+	dec := json.NewDecoder(bytes.NewReader(out))
+	for dec.More() {
+		var report kfReport
+		if err := dec.Decode(&report); err != nil {
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-				fmt.Sprintf("kingfisher JSON parse failed: %s (output %d bytes)", err.Error(), len(out)))
-			return nil
+				fmt.Sprintf("kingfisher JSON decode error: %s (total output %d bytes)", err.Error(), len(out)))
+			break
 		}
+		all = append(all, report.Findings...)
 	}
 	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-		fmt.Sprintf("kingfisher found %d findings", len(report.Findings)))
-	return report.Findings
+		fmt.Sprintf("kingfisher found %d findings", len(all)))
+	return all
 }
 
 func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink) {
