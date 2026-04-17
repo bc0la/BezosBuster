@@ -54,6 +54,7 @@
     <input type="search" id="filter" placeholder="filter...">
     <button class="btn" id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
     <button class="btn" id="export-raw" onclick="exportRaw()" style="display:none">Export JSON</button>
+    <button class="btn" id="export-assets" onclick="exportAssets()" style="display:none">Export assets</button>
     <button class="btn btn-warn" id="restore-hidden" onclick="restoreHidden()" style="display:none">Restore hidden</button>
     <span class="hidden-count" id="hidden-count"></span>
   </div>
@@ -133,6 +134,7 @@ async function loadFindings() {
   document.getElementById('export-curls').style.display =
     ['apigw_lambda', 'public_sqs', 'public_sns'].includes(currentModule) ? '' : 'none';
   document.getElementById('export-raw').style.display = currentModule ? '' : 'none';
+  document.getElementById('export-assets').style.display = currentModule ? '' : 'none';
   render();
 }
 
@@ -305,6 +307,78 @@ function exportRaw() {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'bezosbuster-' + (currentModule || 'all') + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function extractAsset(f) {
+  const d = f.detail || {};
+  const mod = f.module;
+  // Smart per-module asset extraction.
+  switch (mod) {
+    case 'apigw_lambda':
+      // Function URLs or API invoke URLs.
+      if (d.url) return d.url;
+      if (d.curl) {
+        const curls = Array.isArray(d.curl) ? d.curl : [d.curl];
+        // Extract URL from curl command.
+        const urls = curls.map(c => { const m = c.match(/'([^']+)'/); return m ? m[1] : null; }).filter(Boolean);
+        if (urls.length) return urls.join('\n');
+      }
+      if (d.api_id && d.path) return d.api_id + ' ' + (d.method||'') + ' ' + d.path;
+      return f.resource_arn || '';
+    case 'public_sqs':
+      return d.queue_url || f.resource_arn || '';
+    case 'public_sns':
+      return d.topic_arn || f.resource_arn || '';
+    case 'cognito':
+      if (d.hosted_ui_url) return d.hosted_ui_url;
+      if (d.pool_id) return d.pool_id + (d.client_id ? '/' + d.client_id : '');
+      if (d.identity_pool_id) return d.identity_pool_id;
+      return f.resource_arn || '';
+    case 'secrets_scan':
+      return d.source || f.resource_arn || '';
+    case 'ec2_userdata':
+      return d.instance_id || f.resource_arn || '';
+    case 'lambda_env':
+      return d.function || f.resource_arn || '';
+    case 'codebuild_env':
+      return d.project || f.resource_arn || '';
+    case 'ssm_commands':
+      return d.document + ' (' + (d.execution_count||1) + 'x)';
+    case 'public_ecr':
+      return d.uri || f.resource_arn || '';
+    case 'ecs_ecr_taskdefs':
+      return d.family || f.resource_arn || '';
+    case 'iam_integrations':
+      return d.role || d.arn || f.resource_arn || '';
+    default:
+      return f.resource_arn || f.title || '';
+  }
+}
+
+function exportAssets() {
+  const hidden = getHidden();
+  const seen = new Set();
+  const lines = [];
+  for (const f of allFindings) {
+    if (hidden[f.id]) continue;
+    const asset = extractAsset(f);
+    if (!asset) continue;
+    // Each asset line could be multi-line (apigw curls), split and dedupe each.
+    for (const line of asset.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed && !seen.has(trimmed)) {
+        seen.add(trimmed);
+        lines.push(trimmed);
+      }
+    }
+  }
+  if (lines.length === 0) { alert('No assets found in visible findings.'); return; }
+  const blob = new Blob([lines.join('\n') + '\n'], {type: 'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'bezosbuster-' + (currentModule || 'all') + '-assets.txt';
   a.click();
   URL.revokeObjectURL(a.href);
 }

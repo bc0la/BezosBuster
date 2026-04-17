@@ -73,6 +73,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 		moduleList []string
 		noTUI      bool
 		noSecrets  bool
+		noS3       bool
 	)
 	c := &cobra.Command{
 		Use:   use,
@@ -134,6 +135,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 			_ = eng.SetMeta(ctx, "opt.kind", kind)
 			_ = eng.SetMeta(ctx, "opt.modules", strings.Join(moduleList, ","))
 
+			if noS3 {
+				ctx = context.WithValue(ctx, "bb.no_s3", true)
+			}
 			return runEngagement(ctx, eng, targets, modules, nil, noTUI)
 		},
 	}
@@ -147,6 +151,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all of this kind)")
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
 	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
+	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
 	return c
 }
 

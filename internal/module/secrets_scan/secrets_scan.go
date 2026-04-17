@@ -137,8 +137,12 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	}
 
 	// --- Phase 2: S3 — scan per-bucket with cleanup ---
-	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info", "starting S3 scan")
-	scanS3PerBucket(ctx, kfPath, t, sink)
+	if ctx.Value("bb.no_s3") != nil {
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info", "S3 scan skipped (--no-s3)")
+	} else {
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info", "starting S3 scan")
+		scanS3PerBucket(ctx, kfPath, t, sink)
+	}
 
 	return nil
 }
