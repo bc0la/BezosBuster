@@ -74,6 +74,9 @@ type Engagement struct {
 	// filepath.Join(Dir, DBFileName); raw tool output lives at
 	// filepath.Join(Dir, <module>, <accountID>).
 	Dir string
+	// OnLog is called for every LogEvent if non-nil. Used by the TUI
+	// to show live sub-module progress.
+	OnLog func(module, accountID, level, msg string)
 }
 
 // Open opens an engagement at the given directory. The directory is created
@@ -214,6 +217,9 @@ func (e *Engagement) RawDir(module, accountID string) (string, error) {
 }
 
 func (e *Engagement) LogEvent(ctx context.Context, module, accountID, level, msg string) error {
+	if e.OnLog != nil {
+		e.OnLog(module, accountID, level, msg)
+	}
 	_, err := e.db.ExecContext(ctx,
 		`INSERT INTO logs(account_id, module, level, msg, created_at) VALUES(?,?,?,?,?)`,
 		nullIfEmpty(accountID), nullIfEmpty(module), level, msg, time.Now().UTC())

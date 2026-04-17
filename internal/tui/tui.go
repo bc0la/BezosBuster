@@ -31,6 +31,7 @@ type moduleProgress struct {
 	startedAt time.Time
 	elapsed   time.Duration
 	err       string
+	lastLog   string // most recent progress message
 }
 
 type Model struct {
@@ -131,19 +132,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Update counters based on state transition.
-		if prev == "running" {
-			m.runningCount--
-		}
 		switch ev.Status {
+		case "progress":
+			// Sub-module progress log — don't change status or counters.
+			p.lastLog = ev.Err
 		case "running":
+			if prev == "running" {
+				m.runningCount--
+			}
 			p.startedAt = time.Now()
 			p.status = "running"
 			m.runningCount++
 		case "completed":
+			if prev == "running" {
+				m.runningCount--
+			}
 			p.elapsed = time.Since(p.startedAt)
 			p.status = "completed"
+			p.lastLog = ""
 			m.completedCount++
 		case "failed":
+			if prev == "running" {
+				m.runningCount--
+			}
 			p.elapsed = time.Since(p.startedAt)
 			p.status = "failed"
 			p.err = ev.Err
@@ -254,11 +265,19 @@ func (m Model) renderProgress() string {
 	var running []string
 	for k, p := range m.progress {
 		if p.status == "running" {
-			running = append(running, fmt.Sprintf("  %s  %s/%s  %s",
+			line := fmt.Sprintf("  %s  %s/%s  %s",
 				yellow.Render("▸"),
 				dim.Render(k.account),
 				bold.Render(k.module),
-				dim.Render(p.elapsed.Truncate(time.Second).String())))
+				dim.Render(p.elapsed.Truncate(time.Second).String()))
+			if p.lastLog != "" {
+				logMsg := p.lastLog
+				if len(logMsg) > 70 {
+					logMsg = logMsg[:70] + "…"
+				}
+				line += "  " + cyan.Render(logMsg)
+			}
+			running = append(running, line)
 		}
 	}
 	if len(running) > 0 {

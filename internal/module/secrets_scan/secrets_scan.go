@@ -86,54 +86,69 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	regions := awsapi.EnabledRegions(ctx, t.Config)
 
 	// --- Phase 1: Collect non-S3 samples concurrently ---
+	type namedCollector struct {
+		name string
+		fn   func(ctx context.Context, t creds.AccountTarget, regions []string) []sample
+	}
+	collectors := []namedCollector{
+		{"EC2 user data", collectEC2UserData},
+		{"Lambda env vars", collectLambdaEnv},
+		{"Lambda code", collectLambdaCode},
+		{"ECS task defs", collectECSTaskDefs},
+		{"CodeBuild env", collectCodeBuildEnv},
+		{"SSM parameters", collectSSMParams},
+		{"SSM command output", collectSSMCommandOutput},
+		{"CloudFormation", collectCloudFormation},
+		{"API GW stage vars", collectAPIGWStageVars},
+		{"Step Functions", collectStepFunctions},
+		{"CloudWatch Logs", collectCloudWatchLogs},
+		{"IAM keys", collectIAMKeys},
+		{"Glue jobs/connections", collectGlue},
+		{"CodePipeline", collectCodePipeline},
+		{"Elastic Beanstalk", collectBeanstalk},
+		{"AppSync", collectAppSync},
+		{"App Runner", collectAppRunner},
+		{"Lightsail", collectLightsail},
+		{"SageMaker", collectSageMaker},
+		{"EMR", collectEMR},
+		{"Amplify", collectAmplify},
+		{"Redshift", collectRedshift},
+	}
+
 	var mu sync.Mutex
 	var allSamples []sample
 	var wg sync.WaitGroup
+	var doneCount int32
 
-	collectors := []func(ctx context.Context, t creds.AccountTarget, regions []string) []sample{
-		collectEC2UserData,
-		collectLambdaEnv,
-		collectLambdaCode,
-		collectECSTaskDefs,
-		collectCodeBuildEnv,
-		collectSSMParams,
-		collectSSMCommandOutput,
-		collectCloudFormation,
-		collectAPIGWStageVars,
-		collectStepFunctions,
-		collectCloudWatchLogs,
-		collectIAMKeys,
-		collectGlue,
-		collectCodePipeline,
-		collectBeanstalk,
-		collectAppSync,
-		collectAppRunner,
-		collectLightsail,
-		collectSageMaker,
-		collectEMR,
-		collectAmplify,
-		collectRedshift,
-	}
-
-	for _, fn := range collectors {
-		fn := fn
+	for _, c := range collectors {
+		c := c
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			samples := fn(ctx, t, regions)
+			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+				fmt.Sprintf("collecting: %s", c.name))
+			samples := c.fn(ctx, t, regions)
 			mu.Lock()
 			allSamples = append(allSamples, samples...)
+			doneCount++
+			done := doneCount
+			total := int32(len(collectors))
 			mu.Unlock()
+			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+				fmt.Sprintf("collected %d samples from %s (%d/%d collectors done)", len(samples), c.name, done, total))
 		}()
 	}
 	wg.Wait()
 
 	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-		fmt.Sprintf("collected %d non-S3 samples", len(allSamples)))
+		fmt.Sprintf("collected %d total non-S3 samples", len(allSamples)))
 
 	// Scan non-S3 samples.
 	if len(allSamples) > 0 {
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+			fmt.Sprintf("running kingfisher on %d non-S3 samples", len(allSamples)))
 		scanSamples(ctx, kfPath, allSamples, t, sink)
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info", "kingfisher non-S3 scan complete")
 	}
 
 	// --- Phase 2: S3 — scan per-bucket with cleanup ---

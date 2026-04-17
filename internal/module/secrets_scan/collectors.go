@@ -514,8 +514,14 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 	if err != nil {
 		return
 	}
-	for _, b := range buckets.Buckets {
+	totalBuckets := len(buckets.Buckets)
+	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+		fmt.Sprintf("S3: scanning %d buckets", totalBuckets))
+
+	for bi, b := range buckets.Buckets {
 		bName := aws.ToString(b.Name)
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+			fmt.Sprintf("S3: bucket %d/%d: %s", bi+1, totalBuckets, bName))
 		loc, err := s3Cli.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: aws.String(bName)})
 		if err != nil {
 			continue
@@ -596,6 +602,8 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 		}
 
 		if fileIdx > 0 {
+			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+				fmt.Sprintf("S3: scanning %d files from %s with kingfisher", fileIdx, bName))
 			kfFindings := runKingfisher(ctx, kfPath, tmpDir, t, sink)
 			emitFindings(kfFindings, fileMap, t, sink)
 		}

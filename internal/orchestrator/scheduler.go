@@ -66,6 +66,14 @@ func (s *Scheduler) modulesToRun() []module.Module {
 func (s *Scheduler) Run(ctx context.Context, targets []creds.AccountTarget) error {
 	defer close(s.Events)
 
+	// Wire up engagement log events to TUI progress.
+	s.eng.OnLog = func(mod, accountID, level, msg string) {
+		select {
+		case s.Events <- Event{AccountID: accountID, Module: mod, Status: "progress", Err: msg}:
+		default:
+		}
+	}
+
 	modules := s.modulesToRun()
 	if len(modules) == 0 {
 		return fmt.Errorf("no modules registered")
