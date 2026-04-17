@@ -1,14 +1,23 @@
 package secrets_scan
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/you/bezosbuster/internal/findings"
+
+	"github.com/aws/aws-sdk-go-v2/service/amplify"
 	"github.com/aws/aws-sdk-go-v2/service/apigateway"
+	"github.com/aws/aws-sdk-go-v2/service/apprunner"
 	"github.com/aws/aws-sdk-go-v2/service/appsync"
 	"github.com/aws/aws-sdk-go-v2/service/cloudformation"
 	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudformation/types"
@@ -21,16 +30,31 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 	"github.com/aws/aws-sdk-go-v2/service/elasticbeanstalk"
+	"github.com/aws/aws-sdk-go-v2/service/emr"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/redshift"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/sagemaker"
 	"github.com/aws/aws-sdk-go-v2/service/sfn"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
 
 	"github.com/you/bezosbuster/internal/creds"
 )
+
+const maxS3FileSize = 10 * 1024 * 1024 // 10MB
+
+// scannable extensions for Lambda code zip extraction.
+var scannableExts = map[string]bool{
+	".py": true, ".js": true, ".ts": true, ".go": true, ".java": true,
+	".rb": true, ".php": true, ".cs": true, ".sh": true, ".bash": true,
+	".ps1": true, ".json": true, ".yml": true, ".yaml": true, ".xml": true,
+	".toml": true, ".ini": true, ".cfg": true, ".conf": true, ".env": true,
+	".properties": true, ".tf": true, ".hcl": true, ".sql": true, ".txt": true,
+	".md": true, ".html": true, ".htm": true, ".csv": true,
+}
 
 // --- EC2 User Data ---
 
@@ -108,7 +132,7 @@ func collectLambdaEnv(ctx context.Context, t creds.AccountTarget, regions []stri
 	return out
 }
 
-// --- Lambda Function Code ---
+// --- Lambda Function Code (download zip, extract scannable files) ---
 
 func collectLambdaCode(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
 	var out []sample
@@ -121,26 +145,73 @@ func collectLambdaCode(ctx context.Context, t creds.AccountTarget, regions []str
 				break
 			}
 			for _, fn := range list.Functions {
-				// Only download small functions (< 5MB code size).
-				if fn.CodeSize > 5*1024*1024 {
+				// Skip large functions (> 50MB compressed).
+				if fn.CodeSize > 50*1024*1024 {
 					continue
 				}
-				get, err := cli.GetFunction(ctx, &lambda.GetFunctionInput{
-					FunctionName: fn.FunctionArn,
-				})
+				get, err := cli.GetFunction(ctx, &lambda.GetFunctionInput{FunctionName: fn.FunctionArn})
 				if err != nil || get.Code == nil || get.Code.Location == nil {
 					continue
 				}
-				// The location is a presigned URL. We write it as metadata
-				// for kingfisher to potentially download, but for now we skip
-				// actual download — the env vars are the main target.
-				// TODO: download and extract zip for scanning.
+				// Download the zip from the presigned URL.
+				samples := downloadAndExtractLambdaZip(ctx, aws.ToString(get.Code.Location),
+					aws.ToString(fn.FunctionName), aws.ToString(fn.FunctionArn), region)
+				out = append(out, samples...)
 			}
 			if list.NextMarker == nil {
 				break
 			}
 			marker = list.NextMarker
 		}
+	}
+	return out
+}
+
+func downloadAndExtractLambdaZip(ctx context.Context, url, fnName, fnARN, region string) []sample {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	// Read into memory (capped at 50MB).
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 50*1024*1024))
+	if err != nil || len(body) == 0 {
+		return nil
+	}
+
+	reader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return nil
+	}
+
+	var out []sample
+	for _, f := range reader.File {
+		if f.UncompressedSize64 > maxS3FileSize {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(f.Name))
+		if !scannableExts[ext] {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			continue
+		}
+		content, err := io.ReadAll(io.LimitReader(rc, maxS3FileSize))
+		rc.Close()
+		if err != nil || len(content) == 0 {
+			continue
+		}
+		out = append(out, sample{
+			Source: "lambda_code/" + fnName + "/" + f.Name, Region: region,
+			Content:  string(content),
+			Metadata: map[string]string{"arn": fnARN, "function": fnName, "file": f.Name},
+		})
 	}
 	return out
 }
@@ -171,7 +242,6 @@ func collectECSTaskDefs(ctx context.Context, t creds.AccountTarget, regions []st
 					for _, kv := range c.Environment {
 						lines = append(lines, aws.ToString(kv.Name)+"="+aws.ToString(kv.Value))
 					}
-					// Also check command/entrypoint for embedded secrets.
 					if len(c.Command) > 0 {
 						lines = append(lines, "COMMAND="+strings.Join(c.Command, " "))
 					}
@@ -265,7 +335,6 @@ func collectSSMParams(ctx context.Context, t creds.AccountTarget, regions []stri
 					names = append(names, aws.ToString(p.Name))
 				}
 			}
-			// GetParameters in batches of 10.
 			for i := 0; i < len(names); i += 10 {
 				end := i + 10
 				if end > len(names) {
@@ -302,10 +371,8 @@ func collectSSMCommandOutput(ctx context.Context, t creds.AccountTarget, regions
 			}
 			for _, cmd := range page.Commands {
 				cmdID := aws.ToString(cmd.CommandId)
-				// Fetch invocations with output.
 				invPager := ssm.NewListCommandInvocationsPaginator(cli, &ssm.ListCommandInvocationsInput{
-					CommandId: aws.String(cmdID),
-					Details:   true,
+					CommandId: aws.String(cmdID), Details: true,
 				})
 				for invPager.HasMorePages() {
 					invPage, err := invPager.NextPage(ctx)
@@ -318,7 +385,6 @@ func collectSSMCommandOutput(ctx context.Context, t creds.AccountTarget, regions
 							if output == "" {
 								continue
 							}
-							// Truncate at 50KB.
 							if len(output) > 50*1024 {
 								output = output[:50*1024]
 							}
@@ -327,10 +393,9 @@ func collectSSMCommandOutput(ctx context.Context, t creds.AccountTarget, regions
 								Source: "ssm_output/" + cmdID + "/" + instID, Region: region,
 								Content: output,
 								Metadata: map[string]string{
-									"arn":         fmt.Sprintf("arn:aws:ssm:%s:%s:command/%s", region, t.AccountID, cmdID),
-									"command_id":  cmdID,
-									"instance_id": instID,
-									"document":    aws.ToString(cmd.DocumentName),
+									"arn": fmt.Sprintf("arn:aws:ssm:%s:%s:command/%s", region, t.AccountID, cmdID),
+									"command_id": cmdID, "instance_id": instID,
+									"document": aws.ToString(cmd.DocumentName),
 								},
 							})
 						}
@@ -362,11 +427,7 @@ func collectCloudFormation(ctx context.Context, t creds.AccountTarget, regions [
 			for _, stack := range page.StackSummaries {
 				stackName := aws.ToString(stack.StackName)
 				stackARN := aws.ToString(stack.StackId)
-
-				// Stack parameters and outputs.
-				desc, err := cli.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{
-					StackName: aws.String(stackName),
-				})
+				desc, err := cli.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
 				if err == nil && len(desc.Stacks) > 0 {
 					s := desc.Stacks[0]
 					var lines []string
@@ -379,23 +440,18 @@ func collectCloudFormation(ctx context.Context, t creds.AccountTarget, regions [
 					if len(lines) > 0 {
 						out = append(out, sample{
 							Source: "cfn_params/" + stackName, Region: region,
-							Content:  strings.Join(lines, "\n"),
+							Content: strings.Join(lines, "\n"),
 							Metadata: map[string]string{"arn": stackARN, "stack": stackName},
 						})
 					}
 				}
-
-				// Template body.
-				tmpl, err := cli.GetTemplate(ctx, &cloudformation.GetTemplateInput{
-					StackName: aws.String(stackName),
-				})
+				tmpl, err := cli.GetTemplate(ctx, &cloudformation.GetTemplateInput{StackName: aws.String(stackName)})
 				if err == nil && tmpl.TemplateBody != nil {
 					body := aws.ToString(tmpl.TemplateBody)
-					// Skip very large templates.
 					if len(body) < 1024*1024 {
 						out = append(out, sample{
 							Source: "cfn_template/" + stackName, Region: region,
-							Content:  body,
+							Content: body,
 							Metadata: map[string]string{"arn": stackARN, "stack": stackName},
 						})
 					}
@@ -437,9 +493,8 @@ func collectAPIGWStageVars(ctx context.Context, t creds.AccountTarget, regions [
 						Source: "apigw_vars/" + apiName + "/" + aws.ToString(stage.StageName), Region: region,
 						Content: strings.Join(lines, "\n"),
 						Metadata: map[string]string{
-							"arn":   fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
-							"api":   apiName,
-							"stage": aws.ToString(stage.StageName),
+							"arn": fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
+							"api": apiName, "stage": aws.ToString(stage.StageName),
 						},
 					})
 				}
@@ -449,29 +504,16 @@ func collectAPIGWStageVars(ctx context.Context, t creds.AccountTarget, regions [
 	return out
 }
 
-// --- S3 Targeted Secret File Scan ---
+// --- S3 per-bucket scan with cleanup ---
 
-var secretFilePatterns = []string{
-	".env", ".env.local", ".env.production", ".env.staging",
-	"credentials", ".credentials", "config.json", "secrets.json",
-	".htpasswd", "id_rsa", "id_ed25519",
-	"terraform.tfstate", "docker-compose.yml", "docker-compose.yaml",
-	".git/config", ".npmrc", ".pypirc", ".netrc",
-}
-
-const maxS3FileSize = 1024 * 1024     // 1MB
-const maxS3ObjectsPerBucket = 100_000 // skip huge buckets
-
-func collectS3Secrets(ctx context.Context, t creds.AccountTarget, _ []string) []sample {
-	var out []sample
+func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, sink findings.Sink) {
 	s3Cli := s3.NewFromConfig(t.Config)
 	buckets, err := s3Cli.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
-		return out
+		return
 	}
 	for _, b := range buckets.Buckets {
 		bName := aws.ToString(b.Name)
-		// Determine bucket region.
 		loc, err := s3Cli.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: aws.String(bName)})
 		if err != nil {
 			continue
@@ -482,97 +524,114 @@ func collectS3Secrets(ctx context.Context, t creds.AccountTarget, _ []string) []
 		}
 		regionCli := s3.NewFromConfig(t.Config, func(o *s3.Options) { o.Region = bucketRegion })
 
-		// Quick object count check — list first page only.
-		firstPage, err := regionCli.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-			Bucket:  aws.String(bName),
-			MaxKeys: aws.Int32(1000),
-		})
+		// Create temp dir per bucket, scan, then clean up.
+		tmpDir, err := os.MkdirTemp("", "bb-s3-*")
 		if err != nil {
 			continue
 		}
-		if aws.ToInt32(firstPage.KeyCount) >= 1000 && aws.ToBool(firstPage.IsTruncated) {
-			// Large bucket — only scan objects matching secret patterns.
-			for _, pattern := range secretFilePatterns {
-				scanS3Prefix(ctx, regionCli, bName, bucketRegion, t.AccountID, pattern, &out)
+
+		fileMap := map[string]*sample{}
+		fileIdx := 0
+
+		// Paginate all objects, download scannable ones.
+		paginator := s3.NewListObjectsV2Paginator(regionCli, &s3.ListObjectsV2Input{Bucket: aws.String(bName)})
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				break
 			}
-			continue
+			for _, obj := range page.Contents {
+				size := aws.ToInt64(obj.Size)
+				if size == 0 || size > maxS3FileSize {
+					continue
+				}
+				key := aws.ToString(obj.Key)
+				// Skip binary-looking extensions.
+				if isBinaryExt(key) {
+					continue
+				}
+
+				get, err := regionCli.GetObject(ctx, &s3.GetObjectInput{
+					Bucket: aws.String(bName), Key: aws.String(key),
+				})
+				if err != nil {
+					continue
+				}
+				body, err := io.ReadAll(io.LimitReader(get.Body, maxS3FileSize))
+				get.Body.Close()
+				if err != nil || len(body) == 0 {
+					continue
+				}
+				// Skip binary content.
+				if isBinaryContent(body) {
+					continue
+				}
+
+				safe := strings.ReplaceAll(key, "/", "__")
+				safe = strings.ReplaceAll(safe, ":", "_")
+				fname := fmt.Sprintf("%04d_%s", fileIdx, safe)
+				if len(fname) > 200 {
+					fname = fmt.Sprintf("%04d_%s", fileIdx, safe[:190])
+				}
+				fpath := filepath.Join(tmpDir, fname)
+				if err := os.WriteFile(fpath, body, 0600); err != nil {
+					continue
+				}
+				s := &sample{
+					Source: "s3/" + bName + "/" + key, Region: bucketRegion,
+					Content: "", // not needed, file on disk
+					Metadata: map[string]string{
+						"arn": fmt.Sprintf("arn:aws:s3:::%s/%s", bName, key),
+						"bucket": bName, "key": key,
+					},
+				}
+				fileMap[fname] = s
+				fileIdx++
+			}
 		}
 
-		// Small bucket — check all objects against patterns.
-		for _, obj := range firstPage.Contents {
-			key := aws.ToString(obj.Key)
-			if aws.ToInt64(obj.Size) > maxS3FileSize || aws.ToInt64(obj.Size) == 0 {
-				continue
-			}
-			if matchesSecretPattern(key) {
-				downloadS3Object(ctx, regionCli, bName, key, bucketRegion, t.AccountID, &out)
-			}
+		if fileIdx > 0 {
+			kfFindings := runKingfisher(ctx, kfPath, tmpDir, t, sink)
+			emitFindings(kfFindings, fileMap, t, sink)
 		}
+
+		// Clean up this bucket's temp files.
+		os.RemoveAll(tmpDir)
 	}
-	return out
 }
 
-func matchesSecretPattern(key string) bool {
-	lower := strings.ToLower(key)
-	base := lower
-	if idx := strings.LastIndex(lower, "/"); idx >= 0 {
-		base = lower[idx+1:]
-	}
-	for _, p := range secretFilePatterns {
-		if base == p || strings.HasSuffix(base, p) {
-			return true
-		}
-	}
-	// Also check for common extensions.
-	for _, ext := range []string{".pem", ".key", ".pfx", ".p12"} {
-		if strings.HasSuffix(lower, ext) {
-			return true
-		}
+// isBinaryExt returns true for file extensions that are definitely not text.
+func isBinaryExt(key string) bool {
+	ext := strings.ToLower(filepath.Ext(key))
+	switch ext {
+	case ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar",
+		".jpg", ".jpeg", ".png", ".gif", ".bmp", ".ico", ".svg", ".webp",
+		".mp3", ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wav", ".ogg",
+		".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+		".exe", ".dll", ".so", ".dylib", ".o", ".a", ".lib",
+		".whl", ".egg", ".class", ".jar", ".war",
+		".bin", ".dat", ".img", ".iso", ".dmg",
+		".ttf", ".otf", ".woff", ".woff2", ".eot",
+		".parquet", ".avro", ".orc",
+		".sqlite", ".db", ".mdb":
+		return true
 	}
 	return false
 }
 
-func scanS3Prefix(ctx context.Context, cli *s3.Client, bucket, region, accountID, pattern string, out *[]sample) {
-	list, err := cli.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:  aws.String(bucket),
-		MaxKeys: aws.Int32(100),
-	})
-	if err != nil {
-		return
+// isBinaryContent checks if the first 512 bytes look like binary data.
+func isBinaryContent(data []byte) bool {
+	check := data
+	if len(check) > 512 {
+		check = check[:512]
 	}
-	for _, obj := range list.Contents {
-		key := aws.ToString(obj.Key)
-		if aws.ToInt64(obj.Size) > maxS3FileSize || aws.ToInt64(obj.Size) == 0 {
-			continue
-		}
-		if matchesSecretPattern(key) {
-			downloadS3Object(ctx, cli, bucket, key, region, accountID, out)
+	nullCount := 0
+	for _, b := range check {
+		if b == 0 {
+			nullCount++
 		}
 	}
-}
-
-func downloadS3Object(ctx context.Context, cli *s3.Client, bucket, key, region, accountID string, out *[]sample) {
-	get, err := cli.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return
-	}
-	defer get.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(get.Body, maxS3FileSize))
-	if err != nil || len(body) == 0 {
-		return
-	}
-	*out = append(*out, sample{
-		Source: "s3/" + bucket + "/" + key, Region: region,
-		Content: string(body),
-		Metadata: map[string]string{
-			"arn":    fmt.Sprintf("arn:aws:s3:::%s/%s", bucket, key),
-			"bucket": bucket,
-			"key":    key,
-		},
-	})
+	return nullCount > 5
 }
 
 // --- Step Functions ---
@@ -589,9 +648,7 @@ func collectStepFunctions(ctx context.Context, t creds.AccountTarget, regions []
 			}
 			for _, sm := range list.StateMachines {
 				smARN := aws.ToString(sm.StateMachineArn)
-				desc, err := cli.DescribeStateMachine(ctx, &sfn.DescribeStateMachineInput{
-					StateMachineArn: aws.String(smARN),
-				})
+				desc, err := cli.DescribeStateMachine(ctx, &sfn.DescribeStateMachineInput{StateMachineArn: aws.String(smARN)})
 				if err != nil {
 					continue
 				}
@@ -601,7 +658,7 @@ func collectStepFunctions(ctx context.Context, t creds.AccountTarget, regions []
 				}
 				out = append(out, sample{
 					Source: "stepfn/" + aws.ToString(sm.Name), Region: region,
-					Content:  def,
+					Content: def,
 					Metadata: map[string]string{"arn": smARN, "name": aws.ToString(sm.Name)},
 				})
 			}
@@ -629,26 +686,21 @@ func collectCloudWatchLogs(ctx context.Context, t creds.AccountTarget, regions [
 			}
 			for _, g := range groups.LogGroups {
 				groupCount++
-				if groupCount > 50 { // cap at 50 log groups per region
+				if groupCount > 50 {
 					break
 				}
 				groupName := aws.ToString(g.LogGroupName)
-				// Get most recent stream.
 				streams, err := cli.DescribeLogStreams(ctx, &cloudwatchlogs.DescribeLogStreamsInput{
-					LogGroupName: aws.String(groupName),
-					OrderBy:      "LastEventTime",
-					Descending:   aws.Bool(true),
-					Limit:        aws.Int32(1),
+					LogGroupName: aws.String(groupName), OrderBy: "LastEventTime",
+					Descending: aws.Bool(true), Limit: aws.Int32(1),
 				})
 				if err != nil || len(streams.LogStreams) == 0 {
 					continue
 				}
 				streamName := aws.ToString(streams.LogStreams[0].LogStreamName)
 				events, err := cli.GetLogEvents(ctx, &cloudwatchlogs.GetLogEventsInput{
-					LogGroupName:  aws.String(groupName),
-					LogStreamName: aws.String(streamName),
-					Limit:         aws.Int32(100),
-					StartFromHead: aws.Bool(false),
+					LogGroupName: aws.String(groupName), LogStreamName: aws.String(streamName),
+					Limit: aws.Int32(100), StartFromHead: aws.Bool(false),
 				})
 				if err != nil {
 					continue
@@ -663,11 +715,7 @@ func collectCloudWatchLogs(ctx context.Context, t creds.AccountTarget, regions [
 				out = append(out, sample{
 					Source: "cwlogs/" + groupName, Region: region,
 					Content: strings.Join(lines, "\n"),
-					Metadata: map[string]string{
-						"arn":    aws.ToString(g.Arn),
-						"group":  groupName,
-						"stream": streamName,
-					},
+					Metadata: map[string]string{"arn": aws.ToString(g.Arn), "group": groupName, "stream": streamName},
 				})
 			}
 			if groupCount > 50 || groups.NextToken == nil {
@@ -699,17 +747,13 @@ func collectIAMKeys(ctx context.Context, t creds.AccountTarget, _ []string) []sa
 			var lines []string
 			for _, k := range keys.AccessKeyMetadata {
 				lines = append(lines, fmt.Sprintf("AccessKeyId=%s Status=%s Created=%s",
-					aws.ToString(k.AccessKeyId), string(k.Status),
-					k.CreateDate.Format("2006-01-02")))
+					aws.ToString(k.AccessKeyId), string(k.Status), k.CreateDate.Format("2006-01-02")))
 			}
 			if len(lines) > 0 {
 				out = append(out, sample{
 					Source: "iam_keys/" + userName, Region: "global",
 					Content: strings.Join(lines, "\n"),
-					Metadata: map[string]string{
-						"arn":  aws.ToString(u.Arn),
-						"user": userName,
-					},
+					Metadata: map[string]string{"arn": aws.ToString(u.Arn), "user": userName},
 				})
 			}
 		}
@@ -727,8 +771,6 @@ func collectGlue(ctx context.Context, t creds.AccountTarget, regions []string) [
 	var out []sample
 	for _, region := range regions {
 		cli := glue.NewFromConfig(t.Config, func(o *glue.Options) { o.Region = region })
-
-		// Jobs.
 		jobs, err := cli.GetJobs(ctx, &glue.GetJobsInput{})
 		if err == nil {
 			for _, j := range jobs.Jobs {
@@ -740,16 +782,11 @@ func collectGlue(ctx context.Context, t creds.AccountTarget, regions []string) [
 					out = append(out, sample{
 						Source: "glue_job/" + aws.ToString(j.Name), Region: region,
 						Content: strings.Join(lines, "\n"),
-						Metadata: map[string]string{
-							"arn":  fmt.Sprintf("arn:aws:glue:%s:%s:job/%s", region, t.AccountID, aws.ToString(j.Name)),
-							"name": aws.ToString(j.Name),
-						},
+						Metadata: map[string]string{"arn": fmt.Sprintf("arn:aws:glue:%s:%s:job/%s", region, t.AccountID, aws.ToString(j.Name)), "name": aws.ToString(j.Name)},
 					})
 				}
 			}
 		}
-
-		// Connections.
 		conns, err := cli.GetConnections(ctx, &glue.GetConnectionsInput{})
 		if err == nil {
 			for _, c := range conns.ConnectionList {
@@ -761,10 +798,7 @@ func collectGlue(ctx context.Context, t creds.AccountTarget, regions []string) [
 					out = append(out, sample{
 						Source: "glue_conn/" + aws.ToString(c.Name), Region: region,
 						Content: strings.Join(lines, "\n"),
-						Metadata: map[string]string{
-							"arn":  fmt.Sprintf("arn:aws:glue:%s:%s:connection/%s", region, t.AccountID, aws.ToString(c.Name)),
-							"name": aws.ToString(c.Name),
-						},
+						Metadata: map[string]string{"arn": fmt.Sprintf("arn:aws:glue:%s:%s:connection/%s", region, t.AccountID, aws.ToString(c.Name)), "name": aws.ToString(c.Name)},
 					})
 				}
 			}
@@ -795,8 +829,7 @@ func collectCodePipeline(ctx context.Context, t creds.AccountTarget, regions []s
 				for _, stage := range get.Pipeline.Stages {
 					for _, action := range stage.Actions {
 						for k, v := range action.Configuration {
-							lines = append(lines, fmt.Sprintf("%s/%s/%s=%s",
-								aws.ToString(stage.Name), aws.ToString(action.Name), k, v))
+							lines = append(lines, fmt.Sprintf("%s/%s/%s=%s", aws.ToString(stage.Name), aws.ToString(action.Name), k, v))
 						}
 					}
 				}
@@ -804,10 +837,7 @@ func collectCodePipeline(ctx context.Context, t creds.AccountTarget, regions []s
 					out = append(out, sample{
 						Source: "codepipeline/" + pName, Region: region,
 						Content: strings.Join(lines, "\n"),
-						Metadata: map[string]string{
-							"arn":  fmt.Sprintf("arn:aws:codepipeline:%s:%s:%s", region, t.AccountID, pName),
-							"name": pName,
-						},
+						Metadata: map[string]string{"arn": fmt.Sprintf("arn:aws:codepipeline:%s:%s:%s", region, t.AccountID, pName), "name": pName},
 					})
 				}
 			}
@@ -834,8 +864,7 @@ func collectBeanstalk(ctx context.Context, t creds.AccountTarget, regions []stri
 			envName := aws.ToString(env.EnvironmentName)
 			appName := aws.ToString(env.ApplicationName)
 			settings, err := cli.DescribeConfigurationSettings(ctx, &elasticbeanstalk.DescribeConfigurationSettingsInput{
-				ApplicationName: aws.String(appName),
-				EnvironmentName: aws.String(envName),
+				ApplicationName: aws.String(appName), EnvironmentName: aws.String(envName),
 			})
 			if err != nil {
 				continue
@@ -843,11 +872,8 @@ func collectBeanstalk(ctx context.Context, t creds.AccountTarget, regions []stri
 			var lines []string
 			for _, cs := range settings.ConfigurationSettings {
 				for _, opt := range cs.OptionSettings {
-					ns := aws.ToString(opt.Namespace)
-					key := aws.ToString(opt.OptionName)
-					val := aws.ToString(opt.Value)
-					if ns == "aws:elasticbeanstalk:application:environment" && val != "" {
-						lines = append(lines, key+"="+val)
+					if aws.ToString(opt.Namespace) == "aws:elasticbeanstalk:application:environment" && aws.ToString(opt.Value) != "" {
+						lines = append(lines, aws.ToString(opt.OptionName)+"="+aws.ToString(opt.Value))
 					}
 				}
 			}
@@ -855,10 +881,7 @@ func collectBeanstalk(ctx context.Context, t creds.AccountTarget, regions []stri
 				out = append(out, sample{
 					Source: "beanstalk/" + envName, Region: region,
 					Content: strings.Join(lines, "\n"),
-					Metadata: map[string]string{
-						"arn": aws.ToString(env.EnvironmentArn),
-						"env": envName, "app": appName,
-					},
+					Metadata: map[string]string{"arn": aws.ToString(env.EnvironmentArn), "env": envName, "app": appName},
 				})
 			}
 		}
@@ -890,9 +913,264 @@ func collectAppSync(ctx context.Context, t creds.AccountTarget, regions []string
 			out = append(out, sample{
 				Source: "appsync/" + apiName, Region: region,
 				Content: strings.Join(lines, "\n"),
+				Metadata: map[string]string{"arn": fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s", region, t.AccountID, apiID), "api": apiName},
+			})
+		}
+	}
+	return out
+}
+
+// --- App Runner ---
+
+func collectAppRunner(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := apprunner.NewFromConfig(t.Config, func(o *apprunner.Options) { o.Region = region })
+		var nextToken *string
+		for {
+			list, err := cli.ListServices(ctx, &apprunner.ListServicesInput{NextToken: nextToken})
+			if err != nil {
+				break
+			}
+			for _, svc := range list.ServiceSummaryList {
+				svcARN := aws.ToString(svc.ServiceArn)
+				desc, err := cli.DescribeService(ctx, &apprunner.DescribeServiceInput{ServiceArn: aws.String(svcARN)})
+				if err != nil || desc.Service == nil {
+					continue
+				}
+				var lines []string
+				if desc.Service.SourceConfiguration != nil &&
+					desc.Service.SourceConfiguration.ImageRepository != nil &&
+					desc.Service.SourceConfiguration.ImageRepository.ImageConfiguration != nil {
+					for k, v := range desc.Service.SourceConfiguration.ImageRepository.ImageConfiguration.RuntimeEnvironmentVariables {
+						lines = append(lines, k+"="+v)
+					}
+				}
+				if desc.Service.SourceConfiguration != nil &&
+					desc.Service.SourceConfiguration.CodeRepository != nil &&
+					desc.Service.SourceConfiguration.CodeRepository.CodeConfiguration != nil &&
+					desc.Service.SourceConfiguration.CodeRepository.CodeConfiguration.CodeConfigurationValues != nil {
+					for k, v := range desc.Service.SourceConfiguration.CodeRepository.CodeConfiguration.CodeConfigurationValues.RuntimeEnvironmentVariables {
+						lines = append(lines, k+"="+v)
+					}
+				}
+				if len(lines) == 0 {
+					continue
+				}
+				out = append(out, sample{
+					Source: "apprunner/" + aws.ToString(svc.ServiceName), Region: region,
+					Content: strings.Join(lines, "\n"),
+					Metadata: map[string]string{"arn": svcARN, "service": aws.ToString(svc.ServiceName)},
+				})
+			}
+			if list.NextToken == nil {
+				break
+			}
+			nextToken = list.NextToken
+		}
+	}
+	return out
+}
+
+// --- Lightsail ---
+// Lightsail GetInstances does not expose user data on running instances.
+func collectLightsail(_ context.Context, _ creds.AccountTarget, _ []string) []sample {
+	return nil
+}
+
+// --- Redshift Cluster Parameters ---
+
+func collectRedshift(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := redshift.NewFromConfig(t.Config, func(o *redshift.Options) { o.Region = region })
+		clusters, err := cli.DescribeClusters(ctx, &redshift.DescribeClustersInput{})
+		if err != nil {
+			continue
+		}
+		// Collect unique parameter group names.
+		seen := map[string]bool{}
+		for _, c := range clusters.Clusters {
+			for _, pg := range c.ClusterParameterGroups {
+				pgName := aws.ToString(pg.ParameterGroupName)
+				if pgName == "" || seen[pgName] {
+					continue
+				}
+				seen[pgName] = true
+				pager := redshift.NewDescribeClusterParametersPaginator(cli,
+					&redshift.DescribeClusterParametersInput{ParameterGroupName: aws.String(pgName)})
+				var lines []string
+				for pager.HasMorePages() {
+					page, err := pager.NextPage(ctx)
+					if err != nil {
+						break
+					}
+					for _, p := range page.Parameters {
+						val := aws.ToString(p.ParameterValue)
+						if val != "" {
+							lines = append(lines, aws.ToString(p.ParameterName)+"="+val)
+						}
+					}
+				}
+				if len(lines) > 0 {
+					out = append(out, sample{
+						Source: "redshift_params/" + pgName, Region: region,
+						Content: strings.Join(lines, "\n"),
+						Metadata: map[string]string{
+							"arn":             fmt.Sprintf("arn:aws:redshift:%s:%s:parametergroup:%s", region, t.AccountID, pgName),
+							"parameter_group": pgName,
+						},
+					})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// --- SageMaker Notebook Lifecycle Configs ---
+
+func collectSageMaker(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := sagemaker.NewFromConfig(t.Config, func(o *sagemaker.Options) { o.Region = region })
+		notebooks, err := cli.ListNotebookInstances(ctx, &sagemaker.ListNotebookInstancesInput{})
+		if err != nil {
+			continue
+		}
+		// Collect unique lifecycle config names.
+		seen := map[string]bool{}
+		for _, nb := range notebooks.NotebookInstances {
+			lcName := aws.ToString(nb.NotebookInstanceLifecycleConfigName)
+			if lcName == "" || seen[lcName] {
+				continue
+			}
+			seen[lcName] = true
+			lc, err := cli.DescribeNotebookInstanceLifecycleConfig(ctx,
+				&sagemaker.DescribeNotebookInstanceLifecycleConfigInput{
+					NotebookInstanceLifecycleConfigName: aws.String(lcName),
+				})
+			if err != nil {
+				continue
+			}
+			var lines []string
+			for _, s := range lc.OnCreate {
+				decoded, err := base64.StdEncoding.DecodeString(aws.ToString(s.Content))
+				if err == nil {
+					lines = append(lines, "# OnCreate\n"+string(decoded))
+				}
+			}
+			for _, s := range lc.OnStart {
+				decoded, err := base64.StdEncoding.DecodeString(aws.ToString(s.Content))
+				if err == nil {
+					lines = append(lines, "# OnStart\n"+string(decoded))
+				}
+			}
+			if len(lines) > 0 {
+				out = append(out, sample{
+					Source: "sagemaker_lc/" + lcName, Region: region,
+					Content: strings.Join(lines, "\n---\n"),
+					Metadata: map[string]string{
+						"arn":  aws.ToString(lc.NotebookInstanceLifecycleConfigArn),
+						"name": lcName,
+					},
+				})
+			}
+		}
+	}
+	return out
+}
+
+// --- EMR Cluster Configurations ---
+
+func collectEMR(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := emr.NewFromConfig(t.Config, func(o *emr.Options) { o.Region = region })
+		var marker *string
+		for {
+			list, err := cli.ListClusters(ctx, &emr.ListClustersInput{Marker: marker})
+			if err != nil {
+				break
+			}
+			for _, c := range list.Clusters {
+				clusterID := aws.ToString(c.Id)
+				desc, err := cli.DescribeCluster(ctx, &emr.DescribeClusterInput{ClusterId: aws.String(clusterID)})
+				if err != nil || desc.Cluster == nil {
+					continue
+				}
+				var lines []string
+				// Bootstrap actions.
+				bsActions, err := cli.ListBootstrapActions(ctx, &emr.ListBootstrapActionsInput{ClusterId: aws.String(clusterID)})
+				if err == nil {
+					for _, bs := range bsActions.BootstrapActions {
+						lines = append(lines, "BOOTSTRAP:"+aws.ToString(bs.Name)+"="+aws.ToString(bs.ScriptPath))
+						for _, arg := range bs.Args {
+							lines = append(lines, "  ARG="+arg)
+						}
+					}
+				}
+				// Configurations.
+				if desc.Cluster.Configurations != nil {
+					for _, cfg := range desc.Cluster.Configurations {
+						for k, v := range cfg.Properties {
+							lines = append(lines, "CONFIG:"+aws.ToString(cfg.Classification)+"/"+k+"="+v)
+						}
+					}
+				}
+				if len(lines) > 0 {
+					out = append(out, sample{
+						Source: "emr/" + aws.ToString(c.Name), Region: region,
+						Content: strings.Join(lines, "\n"),
+						Metadata: map[string]string{
+							"arn":     aws.ToString(desc.Cluster.ClusterArn),
+							"cluster": aws.ToString(c.Name),
+						},
+					})
+				}
+			}
+			if list.Marker == nil {
+				break
+			}
+			marker = list.Marker
+		}
+	}
+	return out
+}
+
+// --- Amplify ---
+
+func collectAmplify(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := amplify.NewFromConfig(t.Config, func(o *amplify.Options) { o.Region = region })
+		apps, err := cli.ListApps(ctx, &amplify.ListAppsInput{})
+		if err != nil {
+			continue
+		}
+		for _, app := range apps.Apps {
+			var lines []string
+			for k, v := range app.EnvironmentVariables {
+				lines = append(lines, k+"="+v)
+			}
+			// Also check branch-level env vars.
+			branches, err := cli.ListBranches(ctx, &amplify.ListBranchesInput{AppId: app.AppId})
+			if err == nil {
+				for _, br := range branches.Branches {
+					for k, v := range br.EnvironmentVariables {
+						lines = append(lines, "BRANCH:"+aws.ToString(br.BranchName)+"/"+k+"="+v)
+					}
+				}
+			}
+			if len(lines) == 0 {
+				continue
+			}
+			out = append(out, sample{
+				Source: "amplify/" + aws.ToString(app.Name), Region: region,
+				Content: strings.Join(lines, "\n"),
 				Metadata: map[string]string{
-					"arn":  fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s", region, t.AccountID, apiID),
-					"api":  apiName,
+					"arn":  aws.ToString(app.AppArn),
+					"app":  aws.ToString(app.Name),
 				},
 			})
 		}

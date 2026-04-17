@@ -1,4 +1,4 @@
-// Package secrets_scan collects text from 30+ AWS locations where secrets
+// Package secrets_scan collects text from 35+ AWS locations where secrets
 // can be stored insecurely and feeds them through kingfisher for detection.
 package secrets_scan
 
@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/you/bezosbuster/internal/awsapi"
 	"github.com/you/bezosbuster/internal/creds"
@@ -45,13 +44,18 @@ func (Module) Requires() []string {
 		"elasticbeanstalk:DescribeEnvironments",
 		"elasticbeanstalk:DescribeConfigurationSettings",
 		"appsync:ListGraphqlApis", "appsync:ListApiKeys",
-		"cognito-idp:ListUserPools",
+		"apprunner:ListServices", "apprunner:DescribeService",
+		"sagemaker:ListNotebookInstances",
+		"sagemaker:DescribeNotebookInstanceLifecycleConfig",
+		"emr:ListClusters", "emr:DescribeCluster", "emr:ListBootstrapActions",
+		"redshift:DescribeClusters", "redshift:DescribeClusterParameters",
+		"amplify:ListApps", "amplify:ListBranches",
 	}
 }
 
 // sample is a piece of text collected from an AWS source to scan for secrets.
 type sample struct {
-	Source   string // e.g. "ec2_userdata/i-abc123"
+	Source   string
 	Region   string
 	Content  string
 	Metadata map[string]string
@@ -74,7 +78,6 @@ type kfReport struct {
 }
 
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
-	// Check kingfisher is available.
 	kfPath, err := exec.LookPath("kingfisher")
 	if err != nil {
 		return fmt.Errorf("kingfisher not on PATH — install in Docker image: %w", err)
@@ -82,13 +85,38 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 
 	regions := awsapi.EnabledRegions(ctx, t.Config)
 
-	// Collect samples from all sources concurrently.
+	// --- Phase 1: Collect non-S3 samples concurrently ---
 	var mu sync.Mutex
 	var allSamples []sample
 	var wg sync.WaitGroup
-	var sampleCount atomic.Int64
 
-	collect := func(fn func(ctx context.Context, t creds.AccountTarget, regions []string) []sample) {
+	collectors := []func(ctx context.Context, t creds.AccountTarget, regions []string) []sample{
+		collectEC2UserData,
+		collectLambdaEnv,
+		collectLambdaCode,
+		collectECSTaskDefs,
+		collectCodeBuildEnv,
+		collectSSMParams,
+		collectSSMCommandOutput,
+		collectCloudFormation,
+		collectAPIGWStageVars,
+		collectStepFunctions,
+		collectCloudWatchLogs,
+		collectIAMKeys,
+		collectGlue,
+		collectCodePipeline,
+		collectBeanstalk,
+		collectAppSync,
+		collectAppRunner,
+		collectLightsail,
+		collectSageMaker,
+		collectEMR,
+		collectAmplify,
+		collectRedshift,
+	}
+
+	for _, fn := range collectors {
+		fn := fn
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -96,50 +124,36 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			mu.Lock()
 			allSamples = append(allSamples, samples...)
 			mu.Unlock()
-			sampleCount.Add(int64(len(samples)))
 		}()
 	}
-
-	// Launch all collectors.
-	collect(collectEC2UserData)
-	collect(collectLambdaEnv)
-	collect(collectLambdaCode)
-	collect(collectECSTaskDefs)
-	collect(collectCodeBuildEnv)
-	collect(collectSSMParams)
-	collect(collectSSMCommandOutput)
-	collect(collectCloudFormation)
-	collect(collectAPIGWStageVars)
-	collect(collectS3Secrets)
-	collect(collectStepFunctions)
-	collect(collectCloudWatchLogs)
-	collect(collectIAMKeys)
-	collect(collectGlue)
-	collect(collectCodePipeline)
-	collect(collectBeanstalk)
-	collect(collectAppSync)
-
 	wg.Wait()
 
 	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-		fmt.Sprintf("collected %d samples from %d sources", len(allSamples), sampleCount.Load()))
+		fmt.Sprintf("collected %d non-S3 samples", len(allSamples)))
 
-	if len(allSamples) == 0 {
-		return nil
+	// Scan non-S3 samples.
+	if len(allSamples) > 0 {
+		scanSamples(ctx, kfPath, allSamples, t, sink)
 	}
 
-	// Write samples to temp directory as files for kingfisher to scan.
+	// --- Phase 2: S3 — scan per-bucket with cleanup ---
+	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info", "starting S3 scan")
+	scanS3PerBucket(ctx, kfPath, t, sink)
+
+	return nil
+}
+
+// scanSamples writes samples to a temp dir, runs kingfisher, emits findings, cleans up.
+func scanSamples(ctx context.Context, kfPath string, samples []sample, t creds.AccountTarget, sink findings.Sink) {
 	tmpDir, err := os.MkdirTemp("", "bb-secrets-*")
 	if err != nil {
-		return fmt.Errorf("create temp dir: %w", err)
+		return
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Map file paths back to sample metadata.
 	fileMap := map[string]*sample{}
-	for i := range allSamples {
-		s := &allSamples[i]
-		// Create subdirectory per source type for organization.
+	for i := range samples {
+		s := &samples[i]
 		safe := strings.ReplaceAll(s.Source, "/", "__")
 		safe = strings.ReplaceAll(safe, ":", "_")
 		fname := fmt.Sprintf("%04d_%s.txt", i, safe)
@@ -150,42 +164,43 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 		fileMap[fname] = s
 	}
 
-	// Run kingfisher.
-	cmd := exec.CommandContext(ctx, kfPath, "scan", tmpDir,
+	kfFindings := runKingfisher(ctx, kfPath, tmpDir, t, sink)
+	emitFindings(kfFindings, fileMap, t, sink)
+}
+
+func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarget, sink findings.Sink) []kfFinding {
+	cmd := exec.CommandContext(ctx, kfPath, "scan", dir,
 		"--format", "json",
 		"--git-history", "none",
 		"--no-validate",
 	)
 	out, err := cmd.Output()
 	if err != nil {
-		// Kingfisher exits 200 when findings exist — that's not an error.
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() != 200 && exitErr.ExitCode() != 205 {
 				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-					fmt.Sprintf("kingfisher exited %d: %s", exitErr.ExitCode(), string(exitErr.Stderr)))
+					fmt.Sprintf("kingfisher exit %d: %s", exitErr.ExitCode(), string(exitErr.Stderr)))
 			}
-			// Use stdout even on non-zero exit.
 			if len(out) == 0 {
 				out = exitErr.Stderr
 			}
 		} else {
-			return fmt.Errorf("kingfisher: %w", err)
-		}
-	}
-
-	// Parse kingfisher output.
-	var report kfReport
-	if err := json.Unmarshal(out, &report); err != nil {
-		// Try parsing as array directly.
-		if err2 := json.Unmarshal(out, &report.Findings); err2 != nil {
-			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-				"failed to parse kingfisher output: "+err.Error())
 			return nil
 		}
 	}
 
-	// Emit findings.
-	for _, f := range report.Findings {
+	var report kfReport
+	if err := json.Unmarshal(out, &report); err != nil {
+		if err2 := json.Unmarshal(out, &report.Findings); err2 != nil {
+			return nil
+		}
+	}
+	return report.Findings
+}
+
+func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink) {
+	ctx := context.Background()
+	for _, f := range kfFindings {
 		fname := filepath.Base(f.FilePath)
 		s, ok := fileMap[fname]
 		if !ok {
@@ -205,8 +220,6 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 		}
 
 		title := fmt.Sprintf("[%s] %s in %s", f.RuleID, f.RuleName, s.Source)
-
-		// Redact the match to show only first/last few chars.
 		redacted := redactMatch(f.Match)
 
 		detail := map[string]any{
@@ -234,8 +247,6 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			Detail:      detail,
 		})
 	}
-
-	return nil
 }
 
 func redactMatch(s string) string {

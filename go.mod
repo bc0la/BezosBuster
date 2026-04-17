@@ -6,8 +6,10 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
+	github.com/aws/aws-sdk-go-v2/service/amplify v1.38.14
 	github.com/aws/aws-sdk-go-v2/service/apigateway v1.39.1
 	github.com/aws/aws-sdk-go-v2/service/apigatewayv2 v1.34.1
+	github.com/aws/aws-sdk-go-v2/service/apprunner v1.39.14
 	github.com/aws/aws-sdk-go-v2/service/appsync v1.53.5
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.71.9
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.69.0
@@ -19,12 +21,15 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.38.13
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.78.0
 	github.com/aws/aws-sdk-go-v2/service/elasticbeanstalk v1.34.2
+	github.com/aws/aws-sdk-go-v2/service/emr v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/glue v1.139.2
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.7
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.89.0
 	github.com/aws/aws-sdk-go-v2/service/organizations v1.51.1
 	github.com/aws/aws-sdk-go-v2/service/rds v1.117.1
+	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.5
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
+	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.240.0
 	github.com/aws/aws-sdk-go-v2/service/sfn v1.40.10
 	github.com/aws/aws-sdk-go-v2/service/sns v1.39.15
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.25
