@@ -168,7 +168,7 @@ function buildTableHeader() {
     resizer.addEventListener('mousedown', e => {
       e.preventDefault();
       const startX = e.pageX;
-      const startW = th.offsetWidth;
+      const startW = colWidths[ci]; // use stored width, not rendered
       resizer.classList.add('active');
       const onMove = e2 => {
         const w = Math.max(30, startW + e2.pageX - startX);
