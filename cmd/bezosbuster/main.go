@@ -72,6 +72,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 		engDir     string
 		moduleList []string
 		noTUI      bool
+		noSecrets  bool
 	)
 	c := &cobra.Command{
 		Use:   use,
@@ -96,6 +97,15 @@ func runCmd(use, short, kind string) *cobra.Command {
 
 			// Resolve final module list using the kind filter + user subset.
 			modules := selectModules(kind, moduleList)
+			if noSecrets {
+				var filtered []string
+				for _, m := range modules {
+					if m != "secrets_scan" {
+						filtered = append(filtered, m)
+					}
+				}
+				modules = filtered
+			}
 			if len(modules) == 0 {
 				return fmt.Errorf("no %s modules to run", kind)
 			}
@@ -136,6 +146,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().StringVar(&engDir, "engagement", "", "Existing engagement dir to append to (default: create new)")
 	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all of this kind)")
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
+	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
 	return c
 }
 
