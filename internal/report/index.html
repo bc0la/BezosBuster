@@ -129,6 +129,7 @@ function renderTabs() {
 }
 
 async function loadFindings() {
+  currentTable = null; // reset table header on module switch
   const qs = currentModule ? `?module=${encodeURIComponent(currentModule)}` : '';
   allFindings = await fetch('/api/findings' + qs).then(r => r.json()) || [];
   document.getElementById('export-curls').style.display =
@@ -138,43 +139,47 @@ async function loadFindings() {
   render();
 }
 
-function render() {
-  const filter = document.getElementById('filter').value.toLowerCase();
-  const hidden = getHidden();
-  const rows = allFindings.filter(f => !filter || JSON.stringify(f).toLowerCase().includes(filter));
-  const content = document.getElementById('content');
-  if (rows.length === 0) { content.textContent = 'no findings'; updateHiddenUI(); return; }
+// Persistent column widths survive re-renders.
+const colDefs = [
+  {name: '', width: 30},
+  {name: 'severity', width: 80},
+  {name: 'account', width: 110},
+  {name: 'region', width: 120},
+  {name: 'module', width: 130},
+  {name: 'title', width: 400},
+  {name: 'resource', width: 250},
+  {name: 'raw', width: 50},
+  {name: 'detail', width: 80}
+];
+const colWidths = colDefs.map(c => c.width);
+let currentTable = null;
 
-  // Build table via DocumentFragment for performance.
+function buildTableHeader() {
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const headerRow = document.createElement('tr');
-  const cols = [
-    {name: '', width: 30},
-    {name: 'severity', width: 80},
-    {name: 'account', width: 110},
-    {name: 'region', width: 120},
-    {name: 'module', width: 130},
-    {name: 'title', width: 400},
-    {name: 'resource', width: 250},
-    {name: 'raw', width: 50},
-    {name: 'detail', width: 80}
-  ];
-  cols.forEach((col, ci) => {
+  colDefs.forEach((col, ci) => {
     const th = document.createElement('th');
     th.textContent = col.name;
-    th.style.width = col.width + 'px';
+    th.style.width = colWidths[ci] + 'px';
     th.style.position = 'relative';
-    // Resizer handle.
     const resizer = document.createElement('div');
     resizer.className = 'resizer';
-    let startX, startW;
     resizer.addEventListener('mousedown', e => {
       e.preventDefault();
-      startX = e.pageX; startW = th.offsetWidth;
+      const startX = e.pageX;
+      const startW = th.offsetWidth;
       resizer.classList.add('active');
-      const onMove = e2 => { th.style.width = Math.max(30, startW + e2.pageX - startX) + 'px'; };
-      const onUp = () => { resizer.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      const onMove = e2 => {
+        const w = Math.max(30, startW + e2.pageX - startX);
+        th.style.width = w + 'px';
+        colWidths[ci] = w;
+      };
+      const onUp = () => {
+        resizer.classList.remove('active');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
@@ -183,6 +188,25 @@ function render() {
   });
   thead.appendChild(headerRow);
   tbl.appendChild(thead);
+  return tbl;
+}
+
+function render() {
+  const filter = document.getElementById('filter').value.toLowerCase();
+  const hidden = getHidden();
+  const rows = allFindings.filter(f => !filter || JSON.stringify(f).toLowerCase().includes(filter));
+  const content = document.getElementById('content');
+  if (rows.length === 0) { content.textContent = 'no findings'; currentTable = null; updateHiddenUI(); return; }
+
+  // Reuse existing table header or build new one.
+  if (!currentTable || !content.contains(currentTable)) {
+    currentTable = buildTableHeader();
+    content.innerHTML = '';
+    content.appendChild(currentTable);
+  }
+  // Remove old tbody if any.
+  const oldTbody = currentTable.querySelector('tbody');
+  if (oldTbody) oldTbody.remove();
 
   const tbody = document.createElement('tbody');
   const frag = document.createDocumentFragment();
@@ -273,9 +297,7 @@ function render() {
     frag.appendChild(tr);
   }
   tbody.appendChild(frag);
-  tbl.appendChild(tbody);
-  content.innerHTML = '';
-  content.appendChild(tbl);
+  currentTable.appendChild(tbody);
   updateHiddenUI();
 }
 

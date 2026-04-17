@@ -61,16 +61,27 @@ type sample struct {
 	Metadata map[string]string
 }
 
-// kfFinding is the subset of kingfisher JSON output we parse.
+// kfFinding matches kingfisher's nested JSON output structure.
 type kfFinding struct {
-	RuleID     string `json:"rule_id"`
-	RuleName   string `json:"rule_name"`
-	Match      string `json:"match"`
-	FilePath   string `json:"file_path"`
-	Line       int    `json:"line"`
-	Confidence string `json:"confidence"`
-	Severity   string `json:"severity"`
-	Verified   *bool  `json:"verified"`
+	Rule    kfRule    `json:"rule"`
+	Finding kfDetail `json:"finding"`
+}
+
+type kfRule struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type kfDetail struct {
+	Snippet    string       `json:"snippet"`
+	Path       string       `json:"path"`
+	Line       int          `json:"line"`
+	Confidence string       `json:"confidence"`
+	Validation kfValidation `json:"validation"`
+}
+
+type kfValidation struct {
+	Status string `json:"status"`
 }
 
 type kfReport struct {
@@ -211,25 +222,29 @@ func runKingfisher(ctx context.Context, kfPath, dir string, t creds.AccountTarge
 	var report kfReport
 	if err := json.Unmarshal(out, &report); err != nil {
 		if err2 := json.Unmarshal(out, &report.Findings); err2 != nil {
+			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
+				fmt.Sprintf("kingfisher JSON parse failed: %s (output %d bytes)", err.Error(), len(out)))
 			return nil
 		}
 	}
+	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+		fmt.Sprintf("kingfisher found %d findings", len(report.Findings)))
 	return report.Findings
 }
 
 func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink) {
 	ctx := context.Background()
 	for _, f := range kfFindings {
-		fname := filepath.Base(f.FilePath)
+		fname := filepath.Base(f.Finding.Path)
 		s, ok := fileMap[fname]
 		if !ok {
 			continue
 		}
 
 		sev := findings.SevHigh
-		if f.Verified != nil && *f.Verified {
+		if strings.EqualFold(f.Finding.Validation.Status, "valid") {
 			sev = findings.SevCritical
-		} else if strings.EqualFold(f.Severity, "low") || strings.EqualFold(f.Confidence, "low") {
+		} else if strings.EqualFold(f.Finding.Confidence, "low") {
 			sev = findings.SevMedium
 		}
 
@@ -238,19 +253,17 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.Ac
 			region = "global"
 		}
 
-		title := fmt.Sprintf("[%s] %s in %s", f.RuleID, f.RuleName, s.Source)
-		redacted := redactMatch(f.Match)
+		title := fmt.Sprintf("[%s] %s in %s", f.Rule.ID, f.Rule.Name, s.Source)
+		redacted := redactMatch(f.Finding.Snippet)
 
 		detail := map[string]any{
-			"rule_id":    f.RuleID,
-			"rule_name":  f.RuleName,
+			"rule_id":    f.Rule.ID,
+			"rule_name":  f.Rule.Name,
 			"match":      redacted,
 			"source":     s.Source,
-			"line":       f.Line,
-			"confidence": f.Confidence,
-		}
-		if f.Verified != nil {
-			detail["verified"] = *f.Verified
+			"line":       f.Finding.Line,
+			"confidence": f.Finding.Confidence,
+			"validation": f.Finding.Validation.Status,
 		}
 		for k, v := range s.Metadata {
 			detail[k] = v
