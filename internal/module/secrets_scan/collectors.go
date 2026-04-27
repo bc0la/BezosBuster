@@ -136,15 +136,22 @@ func collectLambdaEnv(ctx context.Context, t creds.AccountTarget, regions []stri
 
 func collectLambdaCode(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
 	var out []sample
-	for _, region := range regions {
+	for ri, region := range regions {
+		progress(ctx, fmt.Sprintf("Lambda code: region %d/%d %s", ri+1, len(regions), region))
 		cli := lambda.NewFromConfig(t.Config, func(o *lambda.Options) { o.Region = region })
 		var marker *string
+		fnIdx := 0
 		for {
 			list, err := cli.ListFunctions(ctx, &lambda.ListFunctionsInput{Marker: marker})
 			if err != nil {
 				break
 			}
 			for _, fn := range list.Functions {
+				fnIdx++
+				if fnIdx%5 == 1 {
+					progress(ctx, fmt.Sprintf("Lambda code: %s downloading #%d %s",
+						region, fnIdx, aws.ToString(fn.FunctionName)))
+				}
 				// Skip large functions (> 50MB compressed).
 				if fn.CodeSize > 50*1024*1024 {
 					continue
@@ -220,7 +227,8 @@ func downloadAndExtractLambdaZip(ctx context.Context, url, fnName, fnARN, region
 
 func collectECSTaskDefs(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
 	var out []sample
-	for _, region := range regions {
+	for ri, region := range regions {
+		progress(ctx, fmt.Sprintf("ECS task defs: region %d/%d %s", ri+1, len(regions), region))
 		cli := ecs.NewFromConfig(t.Config, func(o *ecs.Options) { o.Region = region })
 		var token *string
 		for {
@@ -230,7 +238,10 @@ func collectECSTaskDefs(ctx context.Context, t creds.AccountTarget, regions []st
 			if err != nil {
 				break
 			}
-			for _, arn := range list.TaskDefinitionArns {
+			for ti, arn := range list.TaskDefinitionArns {
+				if ti%5 == 0 {
+					progress(ctx, fmt.Sprintf("ECS task defs: %s describing %d/%d", region, ti+1, len(list.TaskDefinitionArns)))
+				}
 				desc, err := cli.DescribeTaskDefinition(ctx, &ecs.DescribeTaskDefinitionInput{
 					TaskDefinition: aws.String(arn),
 				})
@@ -411,7 +422,8 @@ func collectSSMCommandOutput(ctx context.Context, t creds.AccountTarget, regions
 
 func collectCloudFormation(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
 	var out []sample
-	for _, region := range regions {
+	for ri, region := range regions {
+		progress(ctx, fmt.Sprintf("CloudFormation: region %d/%d %s", ri+1, len(regions), region))
 		cli := cloudformation.NewFromConfig(t.Config, func(o *cloudformation.Options) { o.Region = region })
 		pager := cloudformation.NewListStacksPaginator(cli, &cloudformation.ListStacksInput{
 			StackStatusFilter: []cftypes.StackStatus{
@@ -424,9 +436,13 @@ func collectCloudFormation(ctx context.Context, t creds.AccountTarget, regions [
 			if err != nil {
 				break
 			}
-			for _, stack := range page.StackSummaries {
+			for si, stack := range page.StackSummaries {
 				stackName := aws.ToString(stack.StackName)
 				stackARN := aws.ToString(stack.StackId)
+				if si%5 == 0 {
+					progress(ctx, fmt.Sprintf("CloudFormation: %s stack %d/%d %s",
+						region, si+1, len(page.StackSummaries), stackName))
+				}
 				desc, err := cli.DescribeStacks(ctx, &cloudformation.DescribeStacksInput{StackName: aws.String(stackName)})
 				if err == nil && len(desc.Stacks) > 0 {
 					s := desc.Stacks[0]
@@ -546,12 +562,20 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 
 		// Paginate all objects, download scannable ones.
 		paginator := s3.NewListObjectsV2Paginator(regionCli, &s3.ListObjectsV2Input{Bucket: aws.String(bName)})
+		pageNum := 0
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
 				break
 			}
-			for _, obj := range page.Contents {
+			pageNum++
+			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+				fmt.Sprintf("S3: %s page %d (%d objects, %d kept so far)", bName, pageNum, len(page.Contents), fileIdx))
+			for oi, obj := range page.Contents {
+				if oi%50 == 0 {
+					_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+						fmt.Sprintf("S3: %s page %d obj %d/%d (%d kept)", bName, pageNum, oi+1, len(page.Contents), fileIdx))
+				}
 				size := aws.ToInt64(obj.Size)
 				if size == 0 || size > maxS3FileSize {
 					continue
@@ -688,7 +712,8 @@ func collectStepFunctions(ctx context.Context, t creds.AccountTarget, regions []
 
 func collectCloudWatchLogs(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
 	var out []sample
-	for _, region := range regions {
+	for ri, region := range regions {
+		progress(ctx, fmt.Sprintf("CloudWatch Logs: region %d/%d %s", ri+1, len(regions), region))
 		cli := cloudwatchlogs.NewFromConfig(t.Config, func(o *cloudwatchlogs.Options) { o.Region = region })
 		var nextToken *string
 		groupCount := 0
@@ -703,6 +728,9 @@ func collectCloudWatchLogs(ctx context.Context, t creds.AccountTarget, regions [
 					break
 				}
 				groupName := aws.ToString(g.LogGroupName)
+				if groupCount%5 == 1 {
+					progress(ctx, fmt.Sprintf("CloudWatch Logs: %s group %d/50 %s", region, groupCount, groupName))
+				}
 				streams, err := cli.DescribeLogStreams(ctx, &cloudwatchlogs.DescribeLogStreamsInput{
 					LogGroupName: aws.String(groupName), OrderBy: "LastEventTime",
 					Descending: aws.Bool(true), Limit: aws.Int32(1),

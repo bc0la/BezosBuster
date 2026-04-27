@@ -24,6 +24,25 @@ type Module struct{}
 
 func init() { module.Register(Module{}) }
 
+// progressKey is the context key used to pass the sink to collectors so they
+// can emit live progress without a signature change.
+type progressKey struct{}
+
+// progress emits a TUI/log progress event if a sink is in ctx. accountID is
+// captured at Run() entry — collectors don't need it.
+func progress(ctx context.Context, msg string) {
+	pc, _ := ctx.Value(progressKey{}).(progressCtx)
+	if pc.sink == nil {
+		return
+	}
+	_ = pc.sink.LogEvent(ctx, "secrets_scan", pc.accountID, "info", msg)
+}
+
+type progressCtx struct {
+	sink      findings.Sink
+	accountID string
+}
+
 func (Module) Name() string      { return "secrets_scan" }
 func (Module) Kind() module.Kind { return module.KindNative }
 func (Module) Requires() []string {
@@ -97,6 +116,7 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 	}
 
 	regions := awsapi.EnabledRegions(ctx, t.Config)
+	ctx = context.WithValue(ctx, progressKey{}, progressCtx{sink: sink, accountID: t.AccountID})
 
 	// --- Phase 1: Collect non-S3 samples concurrently ---
 	type namedCollector struct {
@@ -243,7 +263,26 @@ func runKingfisher(ctx context.Context, kfPath, dir, phase string, t creds.Accou
 		"--git-history", "none",
 		"--no-validate",
 	)
+
+	tickDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		start := time.Now()
+		for {
+			select {
+			case <-tickDone:
+				return
+			case <-ticker.C:
+				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+					fmt.Sprintf("kingfisher %s: still scanning… (%s elapsed)",
+						phase, time.Since(start).Truncate(time.Second)))
+			}
+		}
+	}()
+
 	out, err := cmd.Output()
+	close(tickDone)
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() != 200 && exitErr.ExitCode() != 205 {
