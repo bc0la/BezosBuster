@@ -158,22 +158,41 @@ function buildTableHeader() {
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const headerRow = document.createElement('tr');
-  colDefs.forEach((col, ci) => {
+  const ths = colDefs.map((col, ci) => {
     const th = document.createElement('th');
     th.textContent = col.name;
     th.style.width = colWidths[ci] + 'px';
     th.style.position = 'relative';
+    headerRow.appendChild(th);
+    return th;
+  });
+  // Attach resizers in a second pass so each one knows its right-hand neighbor.
+  // Dragging the resizer between column ci and ci+1 grows ci and shrinks ci+1
+  // by the same amount, keeping the total table width constant — otherwise
+  // table-layout: fixed redistributes the slack across every other column.
+  ths.forEach((th, ci) => {
+    if (ci >= ths.length - 1) return; // last column has no right neighbor
+    const rightTh = ths[ci + 1];
     const resizer = document.createElement('div');
     resizer.className = 'resizer';
     resizer.addEventListener('mousedown', e => {
       e.preventDefault();
       const startX = e.pageX;
-      const startW = colWidths[ci]; // use stored width, not rendered
+      const startW1 = colWidths[ci];
+      const startW2 = colWidths[ci + 1];
+      const minW = 30;
       resizer.classList.add('active');
       const onMove = e2 => {
-        const w = Math.max(30, startW + e2.pageX - startX);
-        th.style.width = w + 'px';
-        colWidths[ci] = w;
+        let dx = e2.pageX - startX;
+        // Clamp so neither column drops below minW.
+        if (startW1 + dx < minW) dx = minW - startW1;
+        if (startW2 - dx < minW) dx = startW2 - minW;
+        const w1 = startW1 + dx;
+        const w2 = startW2 - dx;
+        th.style.width = w1 + 'px';
+        rightTh.style.width = w2 + 'px';
+        colWidths[ci] = w1;
+        colWidths[ci + 1] = w2;
       };
       const onUp = () => {
         resizer.classList.remove('active');
@@ -184,7 +203,6 @@ function buildTableHeader() {
       document.addEventListener('mouseup', onUp);
     });
     th.appendChild(resizer);
-    headerRow.appendChild(th);
   });
   thead.appendChild(headerRow);
   tbl.appendChild(thead);
