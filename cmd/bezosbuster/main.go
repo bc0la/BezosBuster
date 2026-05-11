@@ -23,6 +23,7 @@ import (
 
 	// Side-effect imports to register modules.
 	_ "github.com/you/bezosbuster/internal/module/apigw_lambda"
+	_ "github.com/you/bezosbuster/internal/module/bedrock"
 	_ "github.com/you/bezosbuster/internal/module/bluecloudpeass"
 	_ "github.com/you/bezosbuster/internal/module/codebuild_env"
 	_ "github.com/you/bezosbuster/internal/module/cognito"
