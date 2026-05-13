@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -42,6 +43,7 @@ const (
 	maxDepth         = 3
 	objectsPerFolder = 10
 	probeTimeout     = 10 * time.Second
+	probeWorkers     = 10
 )
 
 var anonClient = &http.Client{Timeout: probeTimeout}
@@ -77,12 +79,7 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			fmt.Sprintf("%s: %s — probing objects", bName, exposure.reason))
 
 		candidates := walkBucket(ctx, regCli, bName)
-		var hits []anonHit
-		for _, key := range candidates {
-			if h, ok := probeAnon(ctx, bName, region, key); ok {
-				hits = append(hits, h)
-			}
-		}
+		hits := probeAll(ctx, bName, region, candidates)
 		if len(hits) == 0 {
 			continue
 		}
@@ -352,6 +349,62 @@ type anonHit struct {
 	contentType string
 	sizeHint    string
 	curl        string
+}
+
+// probeAll fans out anonymous probes across probeWorkers goroutines and
+// returns the confirmed-public hits in the original candidate order.
+func probeAll(ctx context.Context, bucket, region string, keys []string) []anonHit {
+	if len(keys) == 0 {
+		return nil
+	}
+	results := make([]anonHit, len(keys))
+	ok := make([]bool, len(keys))
+
+	type job struct {
+		idx int
+		key string
+	}
+	jobs := make(chan job)
+	var wg sync.WaitGroup
+
+	workers := probeWorkers
+	if workers > len(keys) {
+		workers = len(keys)
+	}
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				if h, found := probeAnon(ctx, bucket, region, j.key); found {
+					results[j.idx] = h
+					ok[j.idx] = true
+				}
+			}
+		}()
+	}
+	for i, k := range keys {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return collectHits(results, ok)
+		case jobs <- job{idx: i, key: k}:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	return collectHits(results, ok)
+}
+
+func collectHits(results []anonHit, ok []bool) []anonHit {
+	var hits []anonHit
+	for i, h := range results {
+		if ok[i] {
+			hits = append(hits, h)
+		}
+	}
+	return hits
 }
 
 func probeAnon(ctx context.Context, bucket, region, key string) (anonHit, bool) {
