@@ -3,6 +3,7 @@ package s3_anon
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
@@ -75,12 +76,14 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			continue
 		}
 
+		list := probeAnonList(ctx, bName, region)
 		_ = sink.LogEvent(ctx, "s3_anon", t.AccountID, "info",
-			fmt.Sprintf("%s: %s — probing objects", bName, exposure.reason))
+			fmt.Sprintf("%s: %s — anon_listable=%t, probing objects",
+				bName, exposure.reason, list.listable))
 
 		candidates := walkBucket(ctx, regCli, bName)
 		hits := probeAll(ctx, bName, region, candidates)
-		if len(hits) == 0 {
+		if !list.listable && len(hits) == 0 {
 			continue
 		}
 
@@ -97,9 +100,48 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			})
 		}
 
+		// Anonymous ListBucket is strictly worse than a few readable objects —
+		// it leaks the whole keyspace, including any future uploads.
 		sev := findings.SevHigh
-		if exposure.policyStatusPublic || exposure.policyAnon {
+		if list.listable {
 			sev = findings.SevCritical
+		}
+
+		var title string
+		switch {
+		case list.listable && len(hits) > 0:
+			title = fmt.Sprintf("S3 bucket %s: anonymously listable + %d public object(s)",
+				bName, len(hits))
+		case list.listable:
+			title = fmt.Sprintf("S3 bucket %s: anonymously listable", bName)
+		default:
+			title = fmt.Sprintf("S3 bucket %s: %d anonymously-readable object(s)",
+				bName, len(hits))
+		}
+
+		detail := map[string]any{
+			"bucket":               bName,
+			"region":               region,
+			"exposure":             exposure.reason,
+			"public_access_block":  exposure.pab,
+			"policy_status_public": exposure.policyStatusPublic,
+			"policy_anon_get":      exposure.policyAnon,
+			"acl_public":           exposure.aclPublic,
+			"anonymously_listable": list.listable,
+			"objects_probed":       len(candidates),
+			"walk_limits": map[string]int{
+				"max_depth":          maxDepth,
+				"objects_per_folder": objectsPerFolder,
+			},
+		}
+		if list.listable {
+			detail["list_curl"] = list.curl
+			detail["list_sample_keys"] = list.sampleKeys
+			detail["list_keys_returned"] = list.totalSeen
+		}
+		if len(hits) > 0 {
+			detail["objects_public"] = objs
+			detail["curl"] = curls
 		}
 
 		_ = sink.Write(ctx, findings.Finding{
@@ -108,24 +150,8 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 			Module:      "s3_anon",
 			Severity:    sev,
 			ResourceARN: "arn:aws:s3:::" + bName,
-			Title: fmt.Sprintf("S3 bucket %s: %d anonymously-readable object(s)",
-				bName, len(hits)),
-			Detail: map[string]any{
-				"bucket":               bName,
-				"region":               region,
-				"exposure":             exposure.reason,
-				"public_access_block":  exposure.pab,
-				"policy_status_public": exposure.policyStatusPublic,
-				"policy_anon_get":      exposure.policyAnon,
-				"acl_public":           exposure.aclPublic,
-				"objects_probed":       len(candidates),
-				"objects_public":       objs,
-				"curl":                 curls,
-				"walk_limits": map[string]int{
-					"max_depth":          maxDepth,
-					"objects_per_folder": objectsPerFolder,
-				},
-			},
+			Title:       title,
+			Detail:      detail,
 		})
 	}
 	return nil
@@ -407,6 +433,54 @@ func collectHits(results []anonHit, ok []bool) []anonHit {
 	return hits
 }
 
+type anonListInfo struct {
+	listable   bool
+	curl       string
+	sampleKeys []string
+	totalSeen  int
+}
+
+// probeAnonList does an unauthenticated GET on the bucket root and treats a
+// 200 with a parseable <ListBucketResult> body as proof that anyone on the
+// internet can enumerate the keyspace.
+func probeAnonList(ctx context.Context, bucket, region string) anonListInfo {
+	u := s3BucketURL(bucket, region)
+	info := anonListInfo{curl: fmt.Sprintf("curl -s '%s'", u)}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return info
+	}
+	resp, err := anonClient.Do(req)
+	if err != nil {
+		return info
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return info
+	}
+
+	var parsed struct {
+		XMLName  xml.Name `xml:"ListBucketResult"`
+		Contents []struct {
+			Key string `xml:"Key"`
+		} `xml:"Contents"`
+	}
+	if err := xml.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return info
+	}
+	info.listable = true
+	info.totalSeen = len(parsed.Contents)
+	n := len(parsed.Contents)
+	if n > 5 {
+		n = 5
+	}
+	for i := 0; i < n; i++ {
+		info.sampleKeys = append(info.sampleKeys, parsed.Contents[i].Key)
+	}
+	return info
+}
+
 func probeAnon(ctx context.Context, bucket, region, key string) (anonHit, bool) {
 	u := s3ObjectURL(bucket, region, key)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -434,6 +508,13 @@ func probeAnon(ctx context.Context, bucket, region, key string) (anonHit, bool) 
 		sizeHint:    size,
 		curl:        fmt.Sprintf("curl -s -o /dev/null -w '%%{http_code}' '%s'", u),
 	}, true
+}
+
+func s3BucketURL(bucket, region string) string {
+	if strings.Contains(bucket, ".") {
+		return fmt.Sprintf("https://s3.%s.amazonaws.com/%s/", region, bucket)
+	}
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/", bucket, region)
 }
 
 func s3ObjectURL(bucket, region, key string) string {
