@@ -44,6 +44,7 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/secrets_scan"
 	_ "github.com/you/bezosbuster/internal/module/ssm_commands"
 	_ "github.com/you/bezosbuster/internal/module/steampipe_perimeter"
+	_ "github.com/you/bezosbuster/internal/module/subdomain_takeover"
 )
 
 func main() {
