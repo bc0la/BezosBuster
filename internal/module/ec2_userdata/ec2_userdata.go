@@ -30,6 +30,8 @@ var secretPatterns = []string{
 	"password", "passwd", "secret", "token", "api_key", "apikey",
 	"aws_access_key", "aws_secret", "credential", "private_key",
 	"BEGIN RSA", "BEGIN PRIVATE", "BEGIN EC PRIVATE", "AKIA",
+	// GitHub/GitLab token value prefixes (matched as substrings).
+	"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "glpat-",
 }
 
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {

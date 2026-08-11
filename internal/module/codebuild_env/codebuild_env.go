@@ -3,6 +3,7 @@ package codebuild_env
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -40,6 +41,13 @@ func looksLikeSecret(key string) bool {
 	}
 	return false
 }
+
+// secretValue matches secret-shaped values regardless of the key name — AWS
+// keys, PEM blocks, Slack/JWT tokens, and GitHub/GitLab tokens — so a token in
+// a blandly-named variable is still caught.
+var secretValue = regexp.MustCompile(`(?i)(AKIA[0-9A-Z]{16}|-----BEGIN|xox[baprs]-|eyJ[A-Za-z0-9_-]{10,}|gh[opsur]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20})`)
+
+func looksLikeSecretValue(val string) bool { return secretValue.MatchString(val) }
 
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	regions := awsapi.EnabledRegions(ctx, t.Config)
@@ -100,7 +108,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 							"value": val,
 							"type":  evType,
 						})
-						if looksLikeSecret(name) {
+						if looksLikeSecret(name) || looksLikeSecretValue(val) {
 							secretHits = append(secretHits, name)
 						}
 					}
@@ -125,12 +133,12 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 					ResourceARN: projARN,
 					Title:       title,
 					Detail: map[string]any{
-						"project":          projName,
-						"plaintext_vars":   plaintext,
-						"secret_matches":   secretHits,
-						"service_role":     aws.ToString(proj.ServiceRole),
-						"source_type":      string(proj.Source.Type),
-						"source_location":  aws.ToString(proj.Source.Location),
+						"project":         projName,
+						"plaintext_vars":  plaintext,
+						"secret_matches":  secretHits,
+						"service_role":    aws.ToString(proj.ServiceRole),
+						"source_type":     string(proj.Source.Type),
+						"source_location": aws.ToString(proj.Source.Location),
 					},
 				})
 			}

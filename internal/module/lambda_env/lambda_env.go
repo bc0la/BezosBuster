@@ -24,7 +24,11 @@ func (Module) Kind() module.Kind  { return module.KindNative }
 func (Module) Requires() []string { return []string{"lambda:ListFunctions"} }
 
 var suspiciousKey = regexp.MustCompile(`(?i)(secret|token|password|passwd|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)`)
-var suspiciousValue = regexp.MustCompile(`(?i)(AKIA[0-9A-Z]{16}|-----BEGIN|xox[baprs]-|eyJ[A-Za-z0-9_-]{10,})`)
+
+// suspiciousValue matches secret-shaped values regardless of the key name:
+// AWS keys, PEM blocks, Slack tokens, JWTs, and GitHub/GitLab tokens
+// (ghp_/gho_/ghu_/ghs_/ghr_ classic, github_pat_ fine-grained, glpat- GitLab).
+var suspiciousValue = regexp.MustCompile(`(?i)(AKIA[0-9A-Z]{16}|-----BEGIN|xox[baprs]-|eyJ[A-Za-z0-9_-]{10,}|gh[opsur]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20})`)
 
 // Run walks every Lambda function in every enabled region and emits one
 // finding per (function, env var) pair so every variable is visible in the
