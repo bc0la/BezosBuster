@@ -39,6 +39,13 @@
   .sev-medium   { color: #ffd166; }
   .sev-low      { color: #99d98c; }
   .sev-info     { color: #7f8bd6; }
+  /* Potential-severity rating dot stamped on section/module/check filters. */
+  .rating { margin-right: 4px; font-size: 9px; vertical-align: middle; }
+  .rating-critical { color: #ff5b5b; }
+  .rating-high     { color: #ff9a3c; }
+  .rating-medium   { color: #ffd166; }
+  .rating-low      { color: #99d98c; }
+  .rating-info     { color: #7f8bd6; }
   details { margin: 0; }
   pre { white-space: pre-wrap; word-break: break-word; background: #0c0c0c; padding: 8px; border: 1px solid #222; max-height: 400px; overflow: auto; }
   .summary { display: flex; gap: 24px; margin-bottom: 16px; flex-wrap: wrap; }
@@ -86,6 +93,22 @@
 let allFindings = [];
 let categories = [];            // [{key,label}] from /api/summary
 const moduleCategory = {};      // module name -> category key
+const moduleRating = {};        // module name -> potential-severity rating
+
+// Potential-severity rating helpers. Each filter (section / module / check) is
+// stamped with a coloured dot for the worst-case severity it can surface.
+const RATING_RANK = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
+function ratingOf(mod) { return moduleRating[mod] || 'medium'; }
+function maxRating(mods) {
+  let best = 'info';
+  for (const m of mods) {
+    if ((RATING_RANK[ratingOf(m)] || 0) > (RATING_RANK[best] || 0)) best = ratingOf(m);
+  }
+  return best;
+}
+function ratingDot(rating) {
+  return '<span class="rating rating-' + rating + '" title="potential severity: ' + rating + '">●</span>';
+}
 let currentSection = '';        // '' = All | category key | '__fp__' = false positives
 let currentModule = '';         // '' = all modules in section
 // Check-type facets the user has toggled off. A "check" is the sub-check within
@@ -156,21 +179,26 @@ function renderNav() {
   const nonFP = allFindings.filter(f => !fp[f.id]);
   const fpCount = allFindings.length - nonFP.length;
 
+  const allMods = Object.keys(moduleRating);
+  const modsInCat = k => allMods.filter(m => moduleCategory[m] === k);
+
   const sections = document.getElementById('sections');
   sections.innerHTML = '';
-  const mkSection = (key, label, count, isFp) => {
+  const mkSection = (key, label, count, isFp, rating) => {
     const b = document.createElement('button');
     if (isFp) b.className = 'fp';
     if (key === currentSection) b.classList.add('active');
-    b.innerHTML = label + '<span class="count">' + count + '</span>';
+    b.innerHTML = (rating ? ratingDot(rating) : '') + label + '<span class="count">' + count + '</span>';
     b.onclick = () => { currentSection = key; currentModule = ''; renderAll(); };
     sections.appendChild(b);
   };
-  mkSection('', 'All', nonFP.length, false);
+  mkSection('', 'All', nonFP.length, false, maxRating(allMods));
   for (const c of categories) {
-    mkSection(c.key, c.label, nonFP.filter(f => categoryOf(f) === c.key).length, false);
+    mkSection(c.key, c.label, nonFP.filter(f => categoryOf(f) === c.key).length, false, maxRating(modsInCat(c.key)));
   }
-  mkSection(FP_SECTION, 'False Positives', fpCount, true);
+  // False Positives rating reflects the worst module actually parked there.
+  const fpMods = [...new Set(allFindings.filter(f => fp[f.id]).map(f => f.module))];
+  mkSection(FP_SECTION, 'False Positives', fpCount, true, fpMods.length ? maxRating(fpMods) : '');
 
   // Module chips: only for a concrete category section (All / FP show none).
   const chips = document.getElementById('chips');
@@ -179,15 +207,15 @@ function renderNav() {
     const mods = Object.keys(moduleCategory)
       .filter(m => moduleCategory[m] === currentSection)
       .sort();
-    const mkChip = (mod, label, count) => {
+    const mkChip = (mod, label, count, rating) => {
       const b = document.createElement('button');
       if (mod === currentModule) b.classList.add('active');
-      b.innerHTML = label + '<span class="count">' + count + '</span>';
+      b.innerHTML = (rating ? ratingDot(rating) : '') + label + '<span class="count">' + count + '</span>';
       b.onclick = () => { currentModule = mod; renderAll(); };
       chips.appendChild(b);
     };
-    mkChip('', 'all', nonFP.filter(f => categoryOf(f) === currentSection).length);
-    for (const m of mods) mkChip(m, m, nonFP.filter(f => f.module === m).length);
+    mkChip('', 'all', nonFP.filter(f => categoryOf(f) === currentSection).length, maxRating(modsInCat(currentSection)));
+    for (const m of mods) mkChip(m, m, nonFP.filter(f => f.module === m).length, ratingOf(m));
   }
 }
 
@@ -215,7 +243,11 @@ function renderSummary() {
 function renderCheckFilter() {
   const base = rowsForSection(currentSection, currentModule, false);
   const counts = {};
-  for (const f of base) counts[f._check] = (counts[f._check] || 0) + 1;
+  const checkMods = {}; // check key -> set of modules that emit it (for the rating)
+  for (const f of base) {
+    counts[f._check] = (counts[f._check] || 0) + 1;
+    (checkMods[f._check] = checkMods[f._check] || new Set()).add(f.module);
+  }
   const keys = Object.keys(counts).sort();
   const bar = document.getElementById('checkfilter');
   bar.innerHTML = '';
@@ -229,7 +261,7 @@ function renderCheckFilter() {
   for (const k of keys) {
     const b = document.createElement('button');
     if (excludedChecks.has(k)) b.classList.add('off');
-    b.innerHTML = k + '<span class="count">' + counts[k] + '</span>';
+    b.innerHTML = ratingDot(maxRating([...checkMods[k]])) + k + '<span class="count">' + counts[k] + '</span>';
     b.title = excludedChecks.has(k) ? 'Click to show' : 'Click to hide';
     b.onclick = () => {
       if (excludedChecks.has(k)) excludedChecks.delete(k); else excludedChecks.add(k);
@@ -543,7 +575,10 @@ document.getElementById('filter').addEventListener('input', () => {
 async function boot() {
   const summary = await fetch('/api/summary').then(r => r.json());
   categories = summary.categories || [];
-  for (const m of (summary.modules || [])) moduleCategory[m.module] = m.category || 'other';
+  for (const m of (summary.modules || [])) {
+    moduleCategory[m.module] = m.category || 'other';
+    moduleRating[m.module] = m.rating || 'medium';
+  }
   allFindings = await fetch('/api/findings').then(r => r.json()) || [];
   // Precompute a lowercase search blob per finding so the text filter never
   // re-stringifies on every keystroke.

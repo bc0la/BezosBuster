@@ -114,6 +114,7 @@ type summaryRow struct {
 	Module   string `json:"module"`
 	Count    int    `json:"count"`
 	Category string `json:"category"`
+	Rating   string `json:"rating"`
 }
 
 func summary(db *sql.DB) (map[string]any, error) {
@@ -137,12 +138,12 @@ func summary(db *sql.DB) (map[string]any, error) {
 	seen := map[string]bool{}
 	var byMod []summaryRow
 	for name, count := range dbCounts {
-		byMod = append(byMod, summaryRow{Module: name, Count: count, Category: module.CategoryOf(name)})
+		byMod = append(byMod, summaryRow{Module: name, Count: count, Category: module.CategoryOf(name), Rating: module.RatingOf(name)})
 		seen[name] = true
 	}
 	for _, m := range module.All() {
 		if !seen[m.Name()] {
-			byMod = append(byMod, summaryRow{Module: m.Name(), Count: 0, Category: module.CategoryOf(m.Name())})
+			byMod = append(byMod, summaryRow{Module: m.Name(), Count: 0, Category: module.CategoryOf(m.Name()), Rating: module.RatingOf(m.Name())})
 		}
 	}
 	sort.Slice(byMod, func(i, j int) bool { return byMod[i].Module < byMod[j].Module })
