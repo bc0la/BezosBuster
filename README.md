@@ -510,6 +510,7 @@ With the `bb-report` alias above: `bb-report /data/<dir>`.
 - "raw" column has a `browse` link for findings with raw output (tool wrappers) — opens `/raw/<module>/<account>/` so you can navigate ScoutSuite's HTML bundle or download `results.json`.
 - "detail" column is a collapsible `<details>` block with the full `detail_json`.
 - Export buttons (curls / JSON / assets) that honor the current section, module, check filter, and text filter (and always exclude false positives).
+- **Report / Utils** top-level tabs. **Utils → SQS Monitor** lists the public queues found by `public_sqs`, lets you select the relevant ones, and — with **Monitor filtered queues** — live-streams each queue's messages into per-queue tabs while writing them to `<engagement>/sqs-monitor/<queue>.jsonl`. It reads queues **anonymously and unsigned** (no AWS creds — the report server stays credential-less), with `VisibilityTimeout=0` and no deletes, so it's a **non-disruptive tap**: the real consumer still receives everything. Only queues present as `public_sqs` findings can be streamed (SSRF guard); a conditioned policy that denies anonymous access shows an error on its tab.
 
 ---
 

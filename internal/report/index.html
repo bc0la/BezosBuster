@@ -27,6 +27,21 @@
   nav.checkbar button .count { opacity: .6; margin-left: 3px; }
   nav.checkbar .checkbar-clear { background: #333; color: #ccc; border: 1px solid #555; text-decoration: none; border-radius: 4px; }
   nav.checkbar .checkbar-clear:hover { background: #555; }
+  nav.toptabs { display: flex; gap: 6px; margin-bottom: 10px; }
+  nav.toptabs button { background: #202020; color: #ddd; border: 1px solid #333; padding: 6px 18px; cursor: pointer; font: inherit; font-weight: 600; border-radius: 4px; }
+  nav.toptabs button.active { background: #2a4d69; border-color: #3a6d99; color: #fff; }
+  #utils h2 { font-size: 16px; margin: 4px 0 8px; }
+  .utils-note { color: #aaa; font-size: 13px; max-width: 900px; line-height: 1.5; }
+  .utils-note code { background: #0c0c0c; border: 1px solid #222; padding: 0 4px; border-radius: 3px; }
+  .sqs-list { display: flex; flex-direction: column; gap: 2px; margin: 12px 0; }
+  .sqs-row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border: 1px solid #222; background: #161616; cursor: pointer; }
+  .sqs-row:hover { background: #1c1c1c; }
+  .muted { color: #888; }
+  .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; }
+  .badge.ok { background: #16321f; color: #8fe0a8; border: 1px solid #2a6b40; }
+  .badge.no { background: #331616; color: #e08f8f; border: 1px solid #6b2a2a; }
+  .badge.cond { background: #332a16; color: #e0c98f; border: 1px solid #6b552a; }
+  .sqs-log { background: #0a0a0a; border: 1px solid #222; padding: 8px; max-height: 60vh; overflow: auto; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 monospace; }
   main { padding: 16px 24px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
   th, td { padding: 6px 8px; border-bottom: 1px solid #222; text-align: left; vertical-align: top; overflow: hidden; text-overflow: ellipsis; }
@@ -69,12 +84,13 @@
 <body>
 <header>
   <h1>BezosBuster report</h1>
+  <nav class="toptabs" id="toptabs"></nav>
   <nav class="sections" id="sections"></nav>
   <nav class="chips" id="chips"></nav>
 </header>
 <main>
   <div class="summary" id="summary"></div>
-  <div class="toolbar">
+  <div class="toolbar" id="toolbar">
     <input type="search" id="filter" placeholder="filter...">
     <button class="btn" id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
     <button class="btn" id="export-raw" onclick="exportRaw()" style="display:none">Export JSON</button>
@@ -83,6 +99,7 @@
   </div>
   <nav class="checkbar" id="checkfilter"></nav>
   <div id="content"></div>
+  <div id="utils" style="display:none"></div>
 </main>
 <script>
 // ---- State ---------------------------------------------------------------
@@ -563,6 +580,146 @@ function downloadText(text, name, type) {
   URL.revokeObjectURL(a.href);
 }
 
+// ---- Top-level view: Report vs Utils -------------------------------------
+let topView = 'report';
+const REPORT_ELS = ['sections', 'chips', 'checkfilter', 'summary', 'toolbar', 'content'];
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function renderTopTabs() {
+  const t = document.getElementById('toptabs');
+  t.innerHTML = '';
+  [['report', 'Report'], ['utils', 'Utils']].forEach(([k, label]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (k === topView) b.classList.add('active');
+    b.onclick = () => setTopView(k);
+    t.appendChild(b);
+  });
+}
+
+function setTopView(v) {
+  topView = v;
+  const rep = v === 'report';
+  REPORT_ELS.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = rep ? '' : 'none'; });
+  document.getElementById('utils').style.display = rep ? 'none' : '';
+  renderTopTabs();
+  if (!rep) loadUtils();
+}
+
+// ---- Utils → SQS Monitor -------------------------------------------------
+let _sqsStreams = [];
+
+async function loadUtils() {
+  const root = document.getElementById('utils');
+  root.innerHTML = '<h2>SQS Monitor</h2>';
+  const note = document.createElement('p');
+  note.className = 'utils-note';
+  note.innerHTML = 'Anonymous tap of public SQS queues — unsigned <code>ReceiveMessage</code>, ' +
+    '<code>VisibilityTimeout=0</code>, never deleted, so it does not disrupt the real consumer. ' +
+    'Every message is also written to <code>&lt;engagement&gt;/sqs-monitor/&lt;queue&gt;.jsonl</code>. ' +
+    'Only queues flagged by <code>public_sqs</code> can be streamed; a queue whose policy is conditioned ' +
+    'may still deny anonymous access (its tab will show that).';
+  root.appendChild(note);
+
+  let queues = [];
+  try { queues = await fetch('/api/utils/sqs/queues').then(r => r.json()) || []; } catch {}
+  if (!queues.length) {
+    const p = document.createElement('p');
+    p.textContent = 'No public SQS queues in this engagement.';
+    root.appendChild(p);
+    return;
+  }
+
+  const list = document.createElement('div');
+  list.className = 'sqs-list';
+  queues.forEach((q, i) => {
+    const row = document.createElement('label');
+    row.className = 'sqs-row';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !!q.anon_receive;   // default-select the anonymously-readable ones
+    cb.dataset.i = i;
+    row.appendChild(cb);
+    const meta = document.createElement('span');
+    meta.innerHTML = ' <strong>' + esc(q.name) + '</strong> <span class="muted">' + esc(q.region) + '</span> ' +
+      (q.anon_receive ? '<span class="badge ok">anon receive</span>' : '<span class="badge no">no anon receive</span>') +
+      (q.has_condition ? ' <span class="badge cond">conditional</span>' : '') +
+      ' <span class="muted">' + esc((q.actions || []).join(', ')) + '</span>';
+    row.appendChild(meta);
+    list.appendChild(row);
+  });
+  root.appendChild(list);
+
+  const bar = document.createElement('div');
+  bar.className = 'toolbar';
+  const btn = document.createElement('button');
+  btn.className = 'btn';
+  btn.textContent = 'Monitor filtered queues';
+  btn.onclick = () => {
+    const sel = [...list.querySelectorAll('input:checked')].map(cb => queues[+cb.dataset.i]);
+    if (!sel.length) { alert('Select at least one queue.'); return; }
+    startMonitor(sel);
+  };
+  bar.appendChild(btn);
+  root.appendChild(bar);
+
+  const view = document.createElement('div');
+  view.id = 'sqs-monitor-view';
+  root.appendChild(view);
+}
+
+// startMonitor opens one SSE stream per selected queue and shows a tab per
+// queue; every stream keeps running while you switch tabs.
+function startMonitor(queues) {
+  _sqsStreams.forEach(es => es.close());
+  _sqsStreams = [];
+  const view = document.getElementById('sqs-monitor-view');
+  view.innerHTML = '';
+  const tabs = document.createElement('nav');
+  tabs.className = 'chips';
+  view.appendChild(tabs);
+  const logs = document.createElement('div');
+  view.appendChild(logs);
+
+  queues.forEach((q, i) => {
+    const log = document.createElement('pre');
+    log.className = 'sqs-log';
+    log.style.display = i === 0 ? 'block' : 'none';
+    logs.appendChild(log);
+
+    let count = 0;
+    const tab = document.createElement('button');
+    tab.textContent = q.name + ' (0)';
+    if (i === 0) tab.classList.add('active');
+    tab.onclick = () => {
+      logs.querySelectorAll('pre').forEach(p => p.style.display = 'none');
+      log.style.display = 'block';
+      tabs.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+      tab.classList.add('active');
+    };
+    tabs.appendChild(tab);
+
+    const append = txt => { log.textContent += txt; log.scrollTop = log.scrollHeight; };
+    const es = new EventSource('/api/utils/sqs/stream?queue=' + encodeURIComponent(q.queue_url));
+    es.addEventListener('status', e => {
+      let d = {}; try { d = JSON.parse(e.data); } catch {}
+      if (d.state === 'connected') append('[connected] writing to ' + (d.file || '') + '\n');
+      else if (d.state === 'error') append('[error ' + (d.code || '') + '] ' + (d.error || '') + '\n');
+    });
+    es.addEventListener('message', e => {
+      let d = {}; try { d = JSON.parse(e.data); } catch {}
+      count++;
+      tab.textContent = q.name + ' (' + count + ')';
+      append(d.ts + '  ' + (d.body || '') + '\n');
+    });
+    es.onerror = () => { /* EventSource auto-reconnects */ };
+    _sqsStreams.push(es);
+  });
+}
+
 // ---- Boot ----------------------------------------------------------------
 // Debounce the text filter so typing only rebuilds the table body once the
 // user pauses, keeping keystrokes responsive on large finding sets.
@@ -587,6 +744,7 @@ async function boot() {
     f._check = checkKey(f);
   }
   renderAll();
+  renderTopTabs();
 }
 boot();
 </script>

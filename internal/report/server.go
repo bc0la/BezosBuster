@@ -60,6 +60,9 @@ func Serve(addr, dir string) error {
 		}
 		writeJSON(w, s)
 	})
+	// Utils → SQS Monitor: list public queues, and stream (anonymously) from one.
+	mux.HandleFunc("/api/utils/sqs/queues", handleSQSQueues(db))
+	mux.HandleFunc("/api/utils/sqs/stream", handleSQSStream(db, dir))
 	fmt.Printf("report listening on http://%s\n", addr)
 	return http.ListenAndServe(addr, mux)
 }
