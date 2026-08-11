@@ -39,7 +39,6 @@ var moduleRating = map[string]string{
 	"codebuild_env":       "high", // plaintext secrets in build env
 	"ecs_ecr_taskdefs":    "high", // secrets in ECS task definitions
 	"cognito":             "high", // anonymous identity pool / weak auth config
-	"pacu_cognito":        "high", // Cognito attack enumeration
 	"scoutsuite":          "high", // broad benchmark; can surface critical posture issues
 	"steampipe_perimeter": "high", // perimeter-exposure benchmark
 

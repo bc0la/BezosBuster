@@ -4,11 +4,12 @@ package exttool
 import (
 	"context"
 	"errors"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/bc0la/BezosBuster/internal/creds"
 	"github.com/bc0la/BezosBuster/internal/findings"
@@ -19,7 +20,13 @@ import (
 // into tool-specific flags (e.g. --report-dir, --export json=<path>).
 type ArgBuilder func(rawDir string) []string
 
-// Run executes a wrapped external tool:
+// Run executes a wrapped external tool bounded only by the caller's context
+// (no added timeout). See RunWithTimeout for the timeout-bounded variant.
+func Run(ctx context.Context, moduleName string, t creds.AccountTarget, sink findings.Sink, binary string, buildArgs ArgBuilder) error {
+	return RunWithTimeout(ctx, moduleName, t, sink, binary, 0, buildArgs)
+}
+
+// RunWithTimeout executes a wrapped external tool:
 //
 //  1. Resolves binary on PATH; logs a warning and returns nil if missing.
 //  2. Asks the sink for a per-(module, account) raw output directory.
@@ -28,7 +35,13 @@ type ArgBuilder func(rawDir string) []string
 //  5. Writes a single summary Finding pointing at the raw dir so the report
 //     UI can link to it; the raw tool output itself is on the filesystem,
 //     not in the SQLite DB.
-func Run(ctx context.Context, moduleName string, t creds.AccountTarget, sink findings.Sink, binary string, buildArgs ArgBuilder) error {
+//
+// If timeout > 0, the tool (and its whole process group) is killed once the
+// deadline elapses and the finding records that it timed out — so one stuck
+// tool (e.g. one blocking on an interactive prompt) can never wedge the
+// entire collect run. Stdin is /dev/null, so a tool that reads it gets an
+// immediate EOF instead of hanging.
+func RunWithTimeout(ctx context.Context, moduleName string, t creds.AccountTarget, sink findings.Sink, binary string, timeout time.Duration, buildArgs ArgBuilder) error {
 	if _, err := exec.LookPath(binary); err != nil {
 		_ = sink.LogEvent(ctx, moduleName, t.AccountID, "warn", "binary not found on PATH: "+binary)
 		return nil
@@ -59,15 +72,40 @@ func Run(ctx context.Context, moduleName string, t creds.AccountTarget, sink fin
 	}
 	defer stderrFile.Close()
 
-	cmd := exec.CommandContext(ctx, binary, args...)
+	runCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+
+	cmd := exec.CommandContext(runCtx, binary, args...)
 	cmd.Env = append(cmd.Env, env...)
-	cmd.Stdout = io.MultiWriter(stdoutFile)
-	cmd.Stderr = io.MultiWriter(stderrFile)
+	cmd.Stdin = nil // /dev/null — a tool reading stdin gets EOF, never blocks
+	cmd.Stdout = stdoutFile
+	cmd.Stderr = stderrFile
+	// Own process group + group-wide SIGKILL on cancel/timeout so children
+	// (e.g. a `yes | tool` pipeline) don't linger; WaitDelay guarantees Wait() returns
+	// even if a grandchild keeps the pipes open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 15 * time.Second
+
 	runErr := cmd.Run()
+	timedOut := runCtx.Err() == context.DeadlineExceeded
 
 	sev := findings.SevInfo
 	title := binary + " completed (output: " + rawDir + ")"
-	if runErr != nil {
+	switch {
+	case timedOut:
+		sev = findings.SevLow
+		title = binary + " timed out after " + timeout.String() + " — killed (output: " + rawDir + ")"
+	case runErr != nil:
 		sev = findings.SevLow
 		title = binary + " failed: " + runErr.Error()
 	}
@@ -78,12 +116,13 @@ func Run(ctx context.Context, moduleName string, t creds.AccountTarget, sink fin
 		Title:         title,
 		RawOutputPath: rawDir,
 		Detail: map[string]any{
-			"binary":  binary,
-			"args":    args,
-			"raw_dir": rawDir,
-			"stdout":  stdoutPath,
-			"stderr":  stderrPath,
-			"exit":    errString(runErr),
+			"binary":    binary,
+			"args":      args,
+			"raw_dir":   rawDir,
+			"stdout":    stdoutPath,
+			"stderr":    stderrPath,
+			"exit":      errString(runErr),
+			"timed_out": timedOut,
 		},
 	})
 	return nil

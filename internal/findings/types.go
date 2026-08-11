@@ -47,7 +47,7 @@ func (f *Finding) DetailJSON() (string, error) {
 // directories on disk, and log events.
 //
 // Findings are normalized and persisted to SQLite for the report UI. Raw
-// tool output (ScoutSuite HTML, Pacu session, Steampipe JSON, etc.) is
+// tool output (ScoutSuite HTML, Blue-CloudPEASS JSON, Steampipe JSON, etc.) is
 // written to the filesystem under the engagement directory so the user can
 // read it directly off the mount — it does not go into the DB.
 type Sink interface {

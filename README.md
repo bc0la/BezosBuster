@@ -1,6 +1,6 @@
 # BezosBuster
 
-Automated AWS whitebox pentest workflow. A single static Go binary (with an optional batteries-included Docker image for the heavier external tools) that drives ScoutSuite / Blue-CloudPEASS / Steampipe mods / Pacu plus a set of native follow-up checks in parallel across one or many AWS accounts, writes findings into a per-engagement SQLite DB for the web report, and stashes raw tool output into per-module/per-account subdirectories so you can read it directly.
+Automated AWS whitebox pentest workflow. A single static Go binary (with an optional batteries-included Docker image for the heavier external tools) that drives ScoutSuite / Blue-CloudPEASS / Steampipe mods plus a set of native follow-up checks in parallel across one or many AWS accounts, writes findings into a per-engagement SQLite DB for the web report, and stashes raw tool output into per-module/per-account subdirectories so you can read it directly.
 
 ## Why
 
@@ -12,7 +12,7 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
 - **SSO expiry handling** — scheduler detects `ExpiredToken` errors, warns, and a `resume` subcommand picks up where it left off.
 - **Parallel orchestration** — per-account + global semaphores; failing modules never abort the run.
 - **`scan` / `collect` split** — `scan` runs native `aws-sdk-go-v2` checks (fast, in-process); `collect` runs external tools (slow, subprocess). Same flags, same engagement dir.
-- **Wraps existing tools**: ScoutSuite, Blue-CloudPEASS, `steampipe-mod-aws-insights`, `steampipe-mod-aws-perimeter`, Pacu cognito enum.
+- **Wraps existing tools**: ScoutSuite, Blue-CloudPEASS, `steampipe-mod-aws-insights`, `steampipe-mod-aws-perimeter`.
 - **Native follow-up checks** via `aws-sdk-go-v2`:
   - **Public-exposure family**: public AMIs; public EBS **and RDS** snapshots; publicly-accessible RDS, Redshift, DocumentDB, Neptune (all TCP-probed); public ECR gallery repos **and private ECR repos with a wildcard/external repository policy**; public SNS/SQS; anonymously-readable S3; OpenSearch/Elasticsearch domains with wildcard access policies; Amazon MQ brokers and MSK (Kafka) clusters with public access; KMS keys whose key policy grants `*`/external-account access.
   - Lambda environment variables (all functions, secret-like key/value regex).
@@ -20,7 +20,7 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
   - Roles with `AssumeRoleWithWebIdentity` and their trust policies/conditions.
   - **API Gateway / Lambda anonymous-reach analyzer**, including the wildcard-bypass logic (a rule like `arn:aws:execute-api:...:api-id/prod/*/dashboard/*` matching `prod/GET/admin/dashboard/createAdmin`).
   - **IAM integrations / federation review** — SAML + OIDC providers, role trust policies, **deep GitHub Actions `:sub` claim analysis** (catches `repo:*` wildcards, org-wide subjects, wildcard owners, missing `:aud`, pull-request subjects), Cognito identity pools with anonymous access, wildcard principals.
-- **Engagement directory per run** — `engagements/<ts>-<acct>/` holds `engagement.db` (normalized findings, powers the report) plus per-tool subdirs (`scoutsuite/<acct>/report.html`, `steampipe_insights/<acct>/results.json`, `pacu_cognito/<acct>/stdout.log`, …) readable straight off the host mount.
+- **Engagement directory per run** — `engagements/<ts>-<acct>/` holds `engagement.db` (normalized findings, powers the report) plus per-tool subdirs (`scoutsuite/<acct>/report.html`, `steampipe_insights/<acct>/results.json`, `bluecloudpeass/<acct>/results.json`, …) readable straight off the host mount.
 - **Bubble Tea TUI** — tabs for accounts, modules, logs, live progress.
 - **Local web report** — `bezosbuster report <dir>` serves a tabbed offline dashboard with deep-links to each tool's raw output via `/raw/...`.
 - **Multi-account Steampipe dashboard** — `bezosbuster steampipe` generates one Steampipe `aws` connection per detected account plus an `aws_bb_all` aggregator, then launches the dashboard for live queries across every account.
@@ -37,7 +37,7 @@ the external tools the heavier commands shell out to.
 | `scan` (native checks) | ✅ works standalone | ✅ |
 | `report` / `resume` / `modules` | ✅ works standalone | ✅ |
 | `secrets_scan` (runs inside `scan`) | needs `kingfisher` on PATH, else skips with a warning | ✅ baked in |
-| `collect` (ScoutSuite / Pacu / Blue-CloudPEASS / Steampipe mods) | needs each tool on PATH, else skips | ✅ baked in |
+| `collect` (ScoutSuite / Blue-CloudPEASS / Steampipe mods) | needs each tool on PATH, else skips | ✅ baked in |
 | `steampipe` (dashboard) | needs `steampipe` + AWS plugin on PATH | ✅ baked in |
 
 ### Binary (recommended for scan/report)
@@ -74,7 +74,7 @@ docker build -t bezosbuster .
 docker pull ghcr.io/bc0la/bezosbuster:latest
 ```
 
-The image bakes in the Go binary + ScoutSuite + Pacu + Steampipe + Powerpipe +
+The image bakes in the Go binary + ScoutSuite + Steampipe + Powerpipe +
 Kingfisher + `steampipe-mod-aws-perimeter` + Blue-CloudPEASS. Runs as non-root
 user `bb` (uid 1000) because Steampipe refuses to run as root. Reach for it when
 you want `collect` or the multi-account `steampipe` dashboard without installing
@@ -216,7 +216,6 @@ report-UI grouping; **rating** is the realistic worst-case potential severity.
 | `iam_integrations` | native | IAM & Access | critical | SAML/OIDC providers + role trust policies: GitHub/GitLab/EKS OIDC `:sub` analysis, cross-account confused-deputy, Cognito identity pools, wildcard principals |
 | `bluecloudpeass` | external | IAM & Access | critical | Blue-AWSPEAS privilege-escalation path enumeration (raw JSON output) |
 | `cognito` | native | IAM & Access | high | Cognito user-pool misconfig (self-signup, risky Lambda triggers, weak policies) |
-| `pacu_cognito` | external | IAM & Access | high | Pacu Cognito attack/enum module (raw output) |
 | `secrets_scan` | native | Secrets Management | critical | Kingfisher secret sweep across ~20 sources (S3, Lambda code, CloudFormation, CloudWatch Logs, Glue, …) |
 | `lambda_env` | native | Secrets Management | high | Secrets in Lambda environment variables |
 | `ec2_userdata` | native | Secrets Management | high | Secrets in EC2 instance user data |
@@ -395,7 +394,7 @@ bb scan --profile dev --engagement /data/2026-04-11-143022-111122223333
 
 ### 2. `collect` — external tools (slow)
 
-Identical flags to `scan`, but runs modules where `Kind() == external`: ScoutSuite, Blue-CloudPEASS, Pacu cognito, `steampipe_insights`, `steampipe_perimeter`. These subprocess out to the real tools and can take minutes to hours.
+Identical flags to `scan`, but runs modules where `Kind() == external`: ScoutSuite, Blue-CloudPEASS, `steampipe_perimeter`. These subprocess out to the real tools and can take minutes to hours. Each is bounded by a timeout (Blue-CloudPEASS 30 min) and group-killed on expiry, so a stuck tool can't wedge the run.
 
 **Auto-delegates to Docker.** `collect` is the external-tool "zoo", and those
 tools are a pain to install natively. So when the flagship tool (`scout`) isn't
@@ -437,10 +436,8 @@ steampipe_insights/111122223333/
   stdout.log
   stderr.log
 bluecloudpeass/111122223333/
+  results.json                    ← Blue-CloudPEASS findings
   stdout.log                      ← whatever Blue-CloudPEASS prints
-  stderr.log
-pacu_cognito/111122223333/
-  stdout.log                      ← pacu's output
   stderr.log
 ```
 
@@ -656,10 +653,7 @@ engagements/
         stderr.log
     bluecloudpeass/
       111122223333/
-        stdout.log
-        stderr.log
-    pacu_cognito/
-      111122223333/
+        results.json
         stdout.log
         stderr.log
 ```
@@ -718,12 +712,11 @@ internal/
     lambda_env/ ecs_ecr_taskdefs/ secrets_scan/
     exttool/              shared helper for external-tool wrappers
     scoutsuite/ bluecloudpeass/ steampipe_perimeter/
-    pacu_cognito/
   findings/               Finding + Sink types
   tui/                    Bubble Tea app
   report/                 embedded SPA + /api/summary + /api/findings + /raw/
   awsapi/                 EnabledRegions helper
-Dockerfile                multi-stage: Go 1.25 + steampipe + scoutsuite + pacu + bluecloudpeass
+Dockerfile                multi-stage: Go 1.25 + steampipe + scoutsuite + bluecloudpeass
 .github/workflows/
   docker.yml              build + push ghcr.io/bc0la/bezosbuster on tag v*
                           (skips builds when only *.md / docs/** change)

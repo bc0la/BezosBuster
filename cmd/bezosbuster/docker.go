@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultDockerImage is the batteries-included image that bundles the external
-// tool zoo (ScoutSuite, Pacu, Steampipe/Powerpipe, Kingfisher, Blue-CloudPEASS).
+// tool zoo (ScoutSuite, Steampipe/Powerpipe, Kingfisher, Blue-CloudPEASS).
 const DefaultDockerImage = "ghcr.io/bc0la/bezosbuster:latest"
 
 // dockerPlan describes how to re-run a subcommand inside the Docker image.

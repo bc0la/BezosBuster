@@ -19,9 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Non-root user (steampipe refuses to run as root).
 RUN useradd -m -u 1000 -s /bin/bash bb
 
-# Python tools as root (writes to /opt) — ScoutSuite + Pacu in a venv.
+# Python tools as root (writes to /opt) — ScoutSuite in a venv.
 RUN python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir scoutsuite pacu termcolor \
+ && /opt/venv/bin/pip install --no-cache-dir scoutsuite termcolor \
  && chmod -R a+rX /opt/venv
 
 # Steampipe (database + plugin engine)
@@ -56,15 +56,6 @@ RUN git clone --depth=1 https://github.com/peass-ng/Blue-CloudPEASS /opt/Blue-Cl
 RUN printf '#!/bin/sh\nexec python3 /opt/Blue-CloudPEASS/Blue-AWSPEAS.py "$@"\n' > /usr/local/bin/blue-cloudpeass \
  && chmod +x /usr/local/bin/blue-cloudpeass
 
-# pacu wrapper for non-interactive single-module runs
-# Session "bezosbuster" is pre-created during build (see below).
-# Pipes unlimited "y" via `yes` to handle all interactive prompts.
-COPY <<'PACUWRAP' /usr/local/bin/pacu-run
-#!/bin/sh
-yes | /opt/venv/bin/pacu --session bezosbuster --exec --module-name "$2" --set-regions all
-PACUWRAP
-RUN chmod +x /usr/local/bin/pacu-run
-
 # powerpipe-run wrapper: ensures steampipe service is running on default
 # port (9193), then runs powerpipe. Service is left running for other modules.
 COPY <<'WRAPPER' /usr/local/bin/powerpipe-run
@@ -89,9 +80,6 @@ WORKDIR /home/bb
 RUN steampipe plugin install aws \
  && mkdir -p /home/bb/mods \
  && git clone --depth=1 https://github.com/turbot/steampipe-mod-aws-perimeter /home/bb/mods/steampipe-mod-aws-perimeter
-
-# Pre-create pacu session so the wrapper can find it at runtime
-RUN printf 'exit\n' | /opt/venv/bin/pacu --new-session bezosbuster 2>/dev/null || true
 
 COPY --from=build /out/bezosbuster /usr/local/bin/bezosbuster
 

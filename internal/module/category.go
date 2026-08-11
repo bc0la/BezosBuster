@@ -39,7 +39,6 @@ var moduleCategory = map[string]string{
 	"iam_integrations": "iam",
 	"bluecloudpeass":   "iam",
 	"cognito":          "iam",
-	"pacu_cognito":     "iam",
 
 	// Public exposure / attack surface.
 	"s3_anon":            "exposure",

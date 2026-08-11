@@ -36,7 +36,6 @@ import (
 	_ "github.com/bc0la/BezosBuster/internal/module/iam_integrations"
 	_ "github.com/bc0la/BezosBuster/internal/module/kms_key_exposure"
 	_ "github.com/bc0la/BezosBuster/internal/module/lambda_env"
-	_ "github.com/bc0la/BezosBuster/internal/module/pacu_cognito"
 	_ "github.com/bc0la/BezosBuster/internal/module/public_amis"
 	_ "github.com/bc0la/BezosBuster/internal/module/public_documentdb"
 	_ "github.com/bc0la/BezosBuster/internal/module/public_ecr"
@@ -72,7 +71,7 @@ func main() {
 	}
 	root.AddCommand(
 		runCmd("scan", "Run native AWS-SDK checks (fast, in-process)", "native"),
-		runCmd("collect", "Run external tools (ScoutSuite, Steampipe mods, Pacu, Blue-CloudPEASS)", "external"),
+		runCmd("collect", "Run external tools (ScoutSuite, Steampipe mods, Blue-CloudPEASS)", "external"),
 		reportCmd(), modulesCmd(), resumeCmd(), steampipeCmd(),
 	)
 	if err := root.Execute(); err != nil {
