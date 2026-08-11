@@ -75,6 +75,7 @@
   .toolbar .btn:hover { background: #3a6d99; }
   .toolbar .btn-warn { background: #693a2a; border-color: #994d3a; }
   .toolbar .btn-warn:hover { background: #994d3a; }
+  #sns-endpoint { background: #0c0c0c; color: #eee; border: 1px solid #3a6d99; padding: 6px 8px; width: 280px; font: inherit; }
   .hide-btn { background: #333; color: #999; border: 1px solid #555; padding: 1px 6px; cursor: pointer; font-size: 11px; }
   .hide-btn:hover { background: #994d3a; color: #fff; border-color: #994d3a; }
   .restore-btn { background: #2a5a3a; color: #cfe; border: 1px solid #3a7d5a; padding: 1px 6px; cursor: pointer; font-size: 11px; }
@@ -95,6 +96,9 @@
     <button class="btn" id="export-curls" onclick="exportCurls()" style="display:none">Export curls</button>
     <button class="btn" id="export-raw" onclick="exportRaw()" style="display:none">Export JSON</button>
     <button class="btn" id="export-assets" onclick="exportAssets()" style="display:none">Export assets</button>
+    <input type="text" id="sns-endpoint" placeholder="you@example.com  |  https://webhook.site/…" style="display:none">
+    <button class="btn" id="export-email-sub" onclick="exportSnsSubscribe('email')" style="display:none">Export email-subscribe</button>
+    <button class="btn" id="export-webhook-sub" onclick="exportSnsSubscribe('https')" style="display:none">Export webhook-subscribe</button>
     <button class="btn btn-warn" id="restore-all" onclick="restoreAll()" style="display:none">Restore all false positives</button>
   </div>
   <nav class="checkbar" id="checkfilter"></nav>
@@ -306,6 +310,12 @@ function renderToolbar() {
   const curlMods = ['apigw_lambda', 'public_sqs', 'public_sns'];
   const curlish = !fpView && (currentSection === 'exposure' || curlMods.includes(currentModule) || currentSection === '');
   show('export-curls', curlish);
+  // SNS subscribe helpers appear only when the current (filtered) view actually
+  // contains public_subscribe findings — so filter to that check first.
+  const hasSnsSub = !fpView && currentRows().some(f => f._check === 'public_subscribe');
+  show('sns-endpoint', hasSnsSub);
+  show('export-email-sub', hasSnsSub);
+  show('export-webhook-sub', hasSnsSub);
 }
 
 // ---- Table (persistent column widths survive re-renders) -----------------
@@ -578,6 +588,42 @@ function downloadText(text, name, type) {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+// exportSnsSubscribe builds `aws sns subscribe` commands for the visible
+// public_subscribe findings, substituting the endpoint from the text box.
+// proto is "email" or "https". Run each with your own AWS creds (SNS needs a
+// signed call; the topic's anonymous policy authorizes your external principal).
+function exportSnsSubscribe(proto) {
+  const endpoint = (document.getElementById('sns-endpoint').value || '').trim();
+  if (!endpoint) { alert('Enter an endpoint first (an email, or an https:// URL).'); return; }
+  if (proto === 'email' && !endpoint.includes('@')) { alert('That does not look like an email address.'); return; }
+  if (proto === 'https' && !/^https?:\/\//i.test(endpoint)) { alert('Webhook must be an http(s):// URL.'); return; }
+
+  const rows = visibleForExport().filter(f => f._check === 'public_subscribe');
+  const lines = [];
+  const seen = new Set();
+  for (const f of rows) {
+    const arn = (f.detail && f.detail.topic_arn) || f.resource_arn;
+    if (!arn || seen.has(arn)) continue;
+    seen.add(arn);
+    lines.push('# ' + (f.detail && f.detail.topic_name || arn) + '  [' + f.account_id + ' ' + f.region + ']');
+    let cmd = "aws sns subscribe --region " + f.region + " --topic-arn '" + arn +
+      "' --protocol " + proto + " --notification-endpoint '" + endpoint + "'";
+    if (proto === 'https') cmd += ' --return-subscription-arn';
+    lines.push(cmd);
+    lines.push('');
+  }
+  if (!lines.length) { alert('No public_subscribe SNS topics in the current view — filter to the public_subscribe check first.'); return; }
+  const header = [
+    '# Run each with your own AWS creds (any account; identity must allow sns:Subscribe).',
+    '# Works cross-account when the topic grants Principal "*" / AWS:"*" for sns:Subscribe with no conditions.',
+    proto === 'email'
+      ? '# Confirm the subscription from the email SNS sends you.'
+      : '# Your endpoint must GET the SubscribeURL in the first SubscriptionConfirmation POST to confirm.',
+    '',
+  ].join('\n');
+  downloadText(header + lines.join('\n'), 'bezosbuster-sns-' + proto + '-subscribe.txt');
 }
 
 // ---- Top-level view: Report vs Utils -------------------------------------
