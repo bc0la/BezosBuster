@@ -135,6 +135,50 @@ bezosbuster scan --profile mgmt --org
 bezosbuster scan --profile mgmt --org --assume-role OrganizationAccountAccessRole
 ```
 
+### Selecting modules
+
+`scan` runs **every native module** by default; `collect` runs every external
+module. List what's registered (with its report section and potential-severity
+rating) before you narrow things down:
+
+```bash
+bezosbuster modules
+# MODULE                 KIND      SECTION          RATING
+# public_opensearch      native    exposure         critical
+# public_rds             native    exposure         critical
+# s3_anon                native    exposure         critical
+# public_mq              native    exposure         high
+# ...
+```
+
+Two ways to narrow the run — they compose, and both work with **every**
+credential mode above (including the cross-account assume-role flow):
+
+```bash
+# Inclusion — run ONLY these modules.
+bezosbuster scan --profile dev --modules s3_anon,public_rds,iam_integrations
+
+# Exclusion — run everything EXCEPT these (applied after --modules / the default).
+bezosbuster scan --profile dev --exclude public_sns,public_sqs,bedrock
+
+# Shortcut for the big, slow one:
+bezosbuster scan --profile dev --no-secrets          # == --exclude secrets_scan
+```
+
+Cross-account assume-role, excluding the noisy/low-value checks for a customer run:
+
+```bash
+bezosbuster scan --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..." \
+  --role-session-name pentest-jane \
+  --exclude secrets_scan,public_sns,public_sqs,bedrock,ec2_imdsv1
+```
+
+`--modules` and `--exclude` are repeatable or comma-separated, are validated
+against the registry (unknown names are ignored), and are recorded in the
+engagement's `meta` so `resume` reproduces the same selection.
+
 ### A full engagement, end to end
 
 ```bash

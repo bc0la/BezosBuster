@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,6 +96,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 		outDir             string
 		engDir             string
 		moduleList         []string
+		excludeList        []string
 		noTUI              bool
 		noSecrets          bool
 		noS3               bool
@@ -124,7 +126,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 						assumeRole: assumeRole, assumeRoleArns: assumeRoleArns,
 						externalID: externalID, roleSessionName: roleSessionName,
 						region: region, outDir: outDir, engDir: engDir,
-						moduleList: moduleList, noTUI: noTUI, noSecrets: noSecrets,
+						moduleList: moduleList, excludeList: excludeList, noTUI: noTUI, noSecrets: noSecrets,
 						noS3: noS3, secretsTimeoutMins: secretsTimeoutMins,
 					})
 					if err != nil {
@@ -166,6 +168,21 @@ func runCmd(use, short, kind string) *cobra.Command {
 				}
 				modules = filtered
 			}
+			// --exclude drops named modules after --modules / the default set,
+			// so you can run "everything except X" without listing the rest.
+			if len(excludeList) > 0 {
+				excl := map[string]bool{}
+				for _, e := range excludeList {
+					excl[strings.TrimSpace(e)] = true
+				}
+				var filtered []string
+				for _, m := range modules {
+					if !excl[m] {
+						filtered = append(filtered, m)
+					}
+				}
+				modules = filtered
+			}
 			if len(modules) == 0 {
 				return fmt.Errorf("no %s modules to run", kind)
 			}
@@ -196,6 +213,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 			_ = eng.SetMeta(ctx, "opt.region", region)
 			_ = eng.SetMeta(ctx, "opt.kind", kind)
 			_ = eng.SetMeta(ctx, "opt.modules", strings.Join(moduleList, ","))
+			_ = eng.SetMeta(ctx, "opt.exclude", strings.Join(excludeList, ","))
 
 			if noS3 {
 				ctx = context.WithValue(ctx, "bb.no_s3", true)
@@ -216,7 +234,8 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
 	c.Flags().StringVar(&outDir, "out", "engagements", "Parent dir for new engagements")
 	c.Flags().StringVar(&engDir, "engagement", "", "Existing engagement dir to append to (default: create new)")
-	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all of this kind)")
+	c.Flags().StringSliceVar(&moduleList, "modules", nil, "Subset of modules to run (default: all of this kind). Repeatable or comma-separated.")
+	c.Flags().StringSliceVar(&excludeList, "exclude", nil, "Modules to exclude, applied after --modules / the default set. Repeatable or comma-separated.")
 	c.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI; stream events as text")
 	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
 	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
@@ -243,6 +262,7 @@ type collectFlags struct {
 	outDir             string
 	engDir             string
 	moduleList         []string
+	excludeList        []string
 	noTUI              bool
 	noSecrets          bool
 	noS3               bool
@@ -281,6 +301,9 @@ func containerArgs(sub string, f collectFlags) ([]string, string, error) {
 	}
 	if len(f.moduleList) > 0 {
 		a = append(a, "--modules", strings.Join(f.moduleList, ","))
+	}
+	if len(f.excludeList) > 0 {
+		a = append(a, "--exclude", strings.Join(f.excludeList, ","))
 	}
 	if f.noTUI {
 		a = append(a, "--no-tui")
@@ -417,10 +440,20 @@ func reportCmd() *cobra.Command {
 func modulesCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "modules",
-		Short: "List registered modules",
+		Short: "List registered modules with their kind, report section, and potential-severity rating",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			for _, m := range module.All() {
-				fmt.Printf("%-22s %s\n", m.Name(), m.Kind())
+			mods := module.All()
+			sort.Slice(mods, func(i, j int) bool {
+				ci, cj := module.CategoryOf(mods[i].Name()), module.CategoryOf(mods[j].Name())
+				if ci != cj {
+					return ci < cj
+				}
+				return mods[i].Name() < mods[j].Name()
+			})
+			fmt.Printf("%-22s %-9s %-16s %s\n", "MODULE", "KIND", "SECTION", "RATING")
+			for _, m := range mods {
+				fmt.Printf("%-22s %-9s %-16s %s\n",
+					m.Name(), m.Kind(), module.CategoryOf(m.Name()), module.RatingOf(m.Name()))
 			}
 			return nil
 		},
