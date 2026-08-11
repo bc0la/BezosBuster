@@ -1,6 +1,6 @@
 # BezosBuster
 
-Automated AWS whitebox pentest workflow. Single Go binary, ships as a Docker image, drives ScoutSuite / Blue-CloudPEASS / Steampipe mods / Pacu plus a set of native follow-up checks in parallel across one or many AWS accounts, writes findings into a per-engagement SQLite DB for the web report, and stashes raw tool output into per-module/per-account subdirectories on the mount so you can read it directly.
+Automated AWS whitebox pentest workflow. A single static Go binary (with an optional batteries-included Docker image for the heavier external tools) that drives ScoutSuite / Blue-CloudPEASS / Steampipe mods / Pacu plus a set of native follow-up checks in parallel across one or many AWS accounts, writes findings into a per-engagement SQLite DB for the web report, and stashes raw tool output into per-module/per-account subdirectories so you can read it directly.
 
 ## Why
 
@@ -27,7 +27,41 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
 
 ## Install
 
-### Docker (recommended)
+BezosBuster ships two ways. The **binary** is the daily driver — it's a single
+static, CGO-free file (SQLite via `modernc.org/sqlite`, no cgo) and needs no
+Docker flags. The **Docker image** is the batteries-included option that bundles
+the external tools the heavier commands shell out to.
+
+| Command | Binary | Docker |
+|---|---|---|
+| `scan` (native checks) | ✅ works standalone | ✅ |
+| `report` / `resume` / `modules` | ✅ works standalone | ✅ |
+| `secrets_scan` (runs inside `scan`) | needs `kingfisher` on PATH, else skips with a warning | ✅ baked in |
+| `collect` (ScoutSuite / Pacu / Blue-CloudPEASS / Steampipe mods) | needs each tool on PATH, else skips | ✅ baked in |
+| `steampipe` (dashboard) | needs `steampipe` + AWS plugin on PATH | ✅ baked in |
+
+### Binary (recommended for scan/report)
+
+```bash
+# Download the release for your platform from GitHub Releases, e.g.
+tar -xzf bezosbuster_*_linux_amd64.tar.gz
+sudo install bezosbuster /usr/local/bin/
+
+# or build from source
+go build -o bezosbuster ./cmd/bezosbuster
+
+bezosbuster scan --profile my-sso-profile
+```
+
+No volume mounts, no `-p`, no `--addr 0.0.0.0` — `~/.aws` is already visible,
+output lands in `./engagements`, and `report` binds `127.0.0.1:7979` directly.
+For a fully self-contained `scan` with no external tools at all, add
+`--no-secrets` (or install `kingfisher` for secret scanning).
+
+Releases are cut by [GoReleaser](.goreleaser.yaml) on `v*` tags
+(linux/darwin × amd64/arm64). `bezosbuster --version` prints the build.
+
+### Docker (batteries-included, for collect/steampipe)
 
 ```bash
 docker build -t bezosbuster .
@@ -35,23 +69,102 @@ docker build -t bezosbuster .
 docker pull ghcr.io/bc0la/bezosbuster:latest
 ```
 
-The image bakes in Go binary + ScoutSuite + Pacu + Steampipe + `steampipe-mod-aws-insights` + `steampipe-mod-aws-perimeter` + Blue-CloudPEASS. Runs as non-root user `bb` (uid 1000) because Steampipe refuses to run as root.
+The image bakes in the Go binary + ScoutSuite + Pacu + Steampipe + Powerpipe +
+Kingfisher + `steampipe-mod-aws-perimeter` + Blue-CloudPEASS. Runs as non-root
+user `bb` (uid 1000) because Steampipe refuses to run as root. Reach for it when
+you want `collect` or the multi-account `steampipe` dashboard without installing
+that toolchain on your host.
 
-### Native
-
-```bash
-go build -o bezosbuster ./cmd/bezosbuster
-./bezosbuster scan --profile my-sso-profile
-```
-
-For `collect` and `steampipe` subcommands you'll also need `scout`, `pacu`, `steampipe`, and the Steampipe AWS plugin on `PATH`. The Docker image is strictly easier.
-
-### Shell aliases for less typing
+### Shell aliases for the Docker path
 
 ```bash
 alias bb='docker run --rm -it -v ~/.aws:/root/.aws:ro -v "$PWD/engagements:/data" ghcr.io/bc0la/bezosbuster:latest'
 alias bb-report='docker run --rm -it -v "$PWD/engagements:/data" -p 7979:7979 ghcr.io/bc0la/bezosbuster:latest report --addr 0.0.0.0:7979'
 alias bb-steampipe='docker run --rm -it -v ~/.aws:/root/.aws:ro -p 9194:9194 ghcr.io/bc0la/bezosbuster:latest steampipe'
+```
+
+(With the binary you don't need these — just run `bezosbuster ...` directly.)
+
+---
+
+## Quickstart
+
+Every example uses the native binary. `scan` is the fast, self-contained path;
+swap in the `bb` Docker alias if you want the bundled external tools for
+`collect` / `steampipe`. All credential modes below work identically on `scan`,
+`collect`, `resume`, and `steampipe`.
+
+### Credential modes
+
+```bash
+# 1. Ambient default chain — env vars / `default` profile / EC2 instance role.
+#    Nothing to pass; the AWS SDK resolves whatever's already configured.
+bezosbuster scan
+
+# 2. Static access keys — export them, then run. Good for short-lived keys.
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_SESSION_TOKEN=...          # only if they're temporary creds
+bezosbuster scan --region us-east-1
+
+# 3. Named profile from ~/.aws/config or ~/.aws/credentials.
+bezosbuster scan --profile dev
+
+# 4. SSO profile — log in first, then scan (token lives ~8h).
+aws sso login --profile my-sso
+bezosbuster scan --profile my-sso
+
+# 5. Several profiles in one run — one scan target per profile.
+bezosbuster scan --profiles dev,staging,prod
+
+# 6. Cross-account assume-role — hop from a hub identity into a customer account.
+#    You assume FROM --profile (or the ambient chain); you assume INTO the ARN.
+bezosbuster scan --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+
+# 7. Multiple customer roles at once — repeat the flag, or comma-join the ARNs.
+bezosbuster scan --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --assume-role-arn arn:aws:iam::444455556666:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..." \
+  --role-session-name pentest-jane
+
+# 8. Whole AWS Organization — enumerate accounts and assume-role into each.
+bezosbuster scan --profile mgmt --org
+bezosbuster scan --profile mgmt --org --assume-role OrganizationAccountAccessRole
+```
+
+### A full engagement, end to end
+
+```bash
+# Fast native checks (fully self-contained; add --no-secrets to skip kingfisher).
+bezosbuster scan --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+# → prints the engagement dir, e.g. engagements/2026-08-10-143022-111122223333
+
+# Heavy external tools into the SAME engagement dir (needs the Docker image).
+bb collect --engagement /data/2026-08-10-143022-111122223333 \
+  --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+
+# Browse findings in a local web report (binds 127.0.0.1:7979).
+bezosbuster report engagements/2026-08-10-143022-111122223333
+
+# SSO/role session died mid-scan? Re-auth and resume — flags are remembered.
+aws sso login --profile hub
+bezosbuster resume engagements/2026-08-10-143022-111122223333
+
+# Live multi-account Steampipe dashboard (needs the Docker image).
+bb-steampipe --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+
+# Scope a run to specific checks.
+bezosbuster scan --profile dev --modules apigw_lambda,iam_integrations
+bezosbuster modules            # list every registered module + its kind
 ```
 
 ---
@@ -66,8 +179,82 @@ All subcommands share the same credential-detection logic:
 | `--profiles a,b,c` | Explicit list of profiles. One target per profile. |
 | *(none)* | Uses the default `AWS_PROFILE` / env vars / instance metadata. |
 | `--org` | Enumerate AWS Organizations and assume-role into every active account. |
-| `--assume-role NAME` | Role name to assume in org mode (default `OrganizationAccountAccessRole`). |
+| `--assume-role NAME` | Role *name* to assume in org mode (default `OrganizationAccountAccessRole`). |
+| `--assume-role-arn ARN` | Cross-account role ARN to assume from `--profile`. Repeatable (one target per ARN). No Organizations access needed — works from outside the target's org. |
+| `--external-id ID` | `ExternalId` passed to `sts:AssumeRole`. Required by most third-party/customer trust policies. |
+| `--role-session-name NAME` | Session name for assumed-role sessions (default `bezosbuster`); shows up in the customer's CloudTrail. |
 | `--region us-east-1` | Region for IAM + Organizations API calls. |
+
+### Cross-account / customer-environment access
+
+The common consulting pattern: you hold **one** hub identity (an SSO profile or an
+IAM user/role in your own account), and each customer has created a role that
+trusts you — usually gated by an **external ID**. BezosBuster hops from your hub
+identity into each customer role. It does **not** need Organizations access, so it
+works even though you're outside the customer's org.
+
+**Option A — first-class flags (ad-hoc, nothing to configure):**
+
+```bash
+# One customer account
+bezosbuster scan \
+  --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+
+# Several customer accounts in one run (repeat the flag)
+bezosbuster scan --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --assume-role-arn arn:aws:iam::444455556666:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+```
+
+You assume **from** whatever `--profile` resolves to (your hub identity) — there's
+no separate "from-ARN" flag; the source is always the profile's credentials, or
+the ambient default chain if you omit `--profile`. You assume **into** each
+`--assume-role-arn`. That flag is a list: repeat it, or comma-join the ARNs
+(`--assume-role-arn arnA,arnB`) since ARNs contain no commas. One scan target per
+ARN.
+
+Each ARN is probed with `sts:GetCallerIdentity` before the scan starts, so a bad
+ARN, wrong external ID, or missing trust fails loudly and immediately instead of
+mid-scan. The chosen options are saved to the engagement so `resume` re-assumes
+the same roles without re-typing anything. These flags work on `scan`, `collect`,
+and `steampipe` alike.
+
+**Option B — profile chaining in `~/.aws/config` (stable customer roster):**
+
+The AWS SDK resolves role chains natively, so you can also just describe each
+customer as a profile and use the existing `--profile` / `--profiles` flags:
+
+```ini
+# ~/.aws/config
+[profile hub]
+sso_start_url = https://your-org.awsapps.com/start
+sso_account_id = 999988887777
+sso_role_name = Engagements
+region = us-east-1
+
+[profile acme]
+role_arn       = arn:aws:iam::111122223333:role/SecurityAudit
+source_profile = hub
+external_id     = acme-2026-Xf9...
+region         = us-east-1
+
+[profile globex]
+role_arn       = arn:aws:iam::444455556666:role/SecurityAudit
+source_profile = hub
+external_id     = globex-2026-Qk2...
+```
+
+```bash
+aws sso login --profile hub          # refresh the hub SSO token
+bezosbuster scan --profiles acme,globex
+```
+
+Use flags for one-off targets, profile chaining when the customer list is stable.
+Either way, when the assumed-role session expires mid-scan the usual
+`resume` flow applies (re-login on the hub, then `bezosbuster resume <dir>`).
 
 ### 1. `scan` — native AWS-SDK checks
 

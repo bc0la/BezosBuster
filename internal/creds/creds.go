@@ -29,11 +29,21 @@ type AccountTarget struct {
 }
 
 type Options struct {
-	Profile     string
-	Profiles    []string
-	Org         bool
-	AssumeRole  string // for org mode
-	Region      string
+	Profile    string
+	Profiles   []string
+	Org        bool
+	AssumeRole string // role *name* to assume in org mode
+	Region     string
+
+	// Cross-account mode: assume one or more explicit role ARNs starting from
+	// the base profile/creds (Profile, or the ambient default chain). This is
+	// the consultant/customer-environment pattern — you hold one hub identity
+	// and hop into each customer account via a role they've let you assume.
+	// Unlike Org mode it needs no organizations:ListAccounts, so it works from
+	// outside the target's AWS Organization.
+	AssumeRoleArns  []string
+	ExternalID      string // sts:AssumeRole ExternalId (third-party trust / confused-deputy guard)
+	RoleSessionName string // session name for assumed roles (default "bezosbuster")
 }
 
 // Detect figures out which account(s) to scan based on user options. It
@@ -46,6 +56,17 @@ func Detect(ctx context.Context, opts Options) ([]AccountTarget, error) {
 	assumeRole := opts.AssumeRole
 	if assumeRole == "" {
 		assumeRole = "OrganizationAccountAccessRole"
+	}
+
+	// Mode: explicit cross-account role ARNs assumed from a base identity.
+	// Highest precedence — if the user named target ARNs, that's exactly what
+	// they want to scan.
+	if len(opts.AssumeRoleArns) > 0 {
+		base, err := loadProfile(ctx, opts.Profile, region)
+		if err != nil {
+			return nil, fmt.Errorf("load base profile: %w", err)
+		}
+		return assumeRoleArns(ctx, base, opts)
 	}
 
 	// Mode: explicit profile list.
@@ -72,7 +93,47 @@ func Detect(ctx context.Context, opts Options) ([]AccountTarget, error) {
 	}
 
 	// Org mode: enumerate accounts and assume role into each.
-	return enumerateOrg(ctx, base, assumeRole)
+	return enumerateOrg(ctx, base, assumeRole, opts.ExternalID, opts.RoleSessionName)
+}
+
+// assumeRoleArns hops from the base identity into each explicitly named role
+// ARN. Every ARN is probed with sts:GetCallerIdentity so a bad ARN / wrong
+// ExternalID / missing trust surfaces immediately rather than mid-scan.
+func assumeRoleArns(ctx context.Context, base AccountTarget, opts Options) ([]AccountTarget, error) {
+	sessName := opts.RoleSessionName
+	if sessName == "" {
+		sessName = "bezosbuster"
+	}
+	stsClient := sts.NewFromConfig(base.Config)
+	var out []AccountTarget
+	for _, arn := range opts.AssumeRoleArns {
+		arn = strings.TrimSpace(arn)
+		if arn == "" {
+			continue
+		}
+		prov := stscreds.NewAssumeRoleProvider(stsClient, arn, func(o *stscreds.AssumeRoleOptions) {
+			o.RoleSessionName = sessName
+			if opts.ExternalID != "" {
+				o.ExternalID = aws.String(opts.ExternalID)
+			}
+		})
+		cfg := base.Config.Copy()
+		cfg.Credentials = aws.NewCredentialsCache(prov)
+		id, alias, err := whoAmI(ctx, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("assume %s: %w", arn, err)
+		}
+		out = append(out, AccountTarget{
+			AccountID: id,
+			Alias:     alias,
+			Profile:   opts.Profile,
+			Config:    cfg,
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no valid role ARNs to assume")
+	}
+	return out, nil
 }
 
 func loadProfile(ctx context.Context, profile, region string) (AccountTarget, error) {
@@ -101,7 +162,10 @@ func whoAmI(ctx context.Context, cfg aws.Config) (string, string, error) {
 	return aws.ToString(id.Account), arn, nil
 }
 
-func enumerateOrg(ctx context.Context, base AccountTarget, roleName string) ([]AccountTarget, error) {
+func enumerateOrg(ctx context.Context, base AccountTarget, roleName, externalID, sessionName string) ([]AccountTarget, error) {
+	if sessionName == "" {
+		sessionName = "bezosbuster"
+	}
 	org := organizations.NewFromConfig(base.Config)
 	var accounts []orgtypes.Account
 	var token *string
@@ -131,7 +195,10 @@ func enumerateOrg(ctx context.Context, base AccountTarget, roleName string) ([]A
 		}
 		roleArn := fmt.Sprintf("arn:aws:iam::%s:role/%s", accID, roleName)
 		prov := stscreds.NewAssumeRoleProvider(stsClient, roleArn, func(o *stscreds.AssumeRoleOptions) {
-			o.RoleSessionName = "bezosbuster"
+			o.RoleSessionName = sessionName
+			if externalID != "" {
+				o.ExternalID = aws.String(externalID)
+			}
 		})
 		cfg := base.Config.Copy()
 		cfg.Credentials = aws.NewCredentialsCache(prov)
@@ -226,5 +293,5 @@ var _ = ststypes.Credentials{}
 // live refresh — resume is via CLI `bezosbuster resume`.
 type ExpiryWatcher struct{ tripped atomic.Bool }
 
-func (w *ExpiryWatcher) Trip()      { w.tripped.Store(true) }
+func (w *ExpiryWatcher) Trip()         { w.tripped.Store(true) }
 func (w *ExpiryWatcher) Tripped() bool { return w.tripped.Load() }

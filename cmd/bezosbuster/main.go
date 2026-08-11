@@ -47,10 +47,18 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/subdomain_takeover"
 )
 
+// Injected at build time via -ldflags (see .goreleaser.yaml).
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	root := &cobra.Command{
-		Use:   "bezosbuster",
-		Short: "Automated AWS whitebox pentest workflow",
+		Use:     "bezosbuster",
+		Short:   "Automated AWS whitebox pentest workflow",
+		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 	}
 	root.AddCommand(
 		runCmd("scan", "Run native AWS-SDK checks (fast, in-process)", "native"),
@@ -67,15 +75,18 @@ func main() {
 // subcommand. They share all flags; only the kind filter differs.
 func runCmd(use, short, kind string) *cobra.Command {
 	var (
-		profile    string
-		profiles   []string
-		org        bool
-		assumeRole string
-		region     string
-		outDir     string
-		engDir     string
-		moduleList []string
-		noTUI      bool
+		profile            string
+		profiles           []string
+		org                bool
+		assumeRole         string
+		assumeRoleArns     []string
+		externalID         string
+		roleSessionName    string
+		region             string
+		outDir             string
+		engDir             string
+		moduleList         []string
+		noTUI              bool
 		noSecrets          bool
 		noS3               bool
 		secretsTimeoutMins int
@@ -88,11 +99,14 @@ func runCmd(use, short, kind string) *cobra.Command {
 			defer cancel()
 
 			targets, err := creds.Detect(ctx, creds.Options{
-				Profile:    profile,
-				Profiles:   profiles,
-				Org:        org,
-				AssumeRole: assumeRole,
-				Region:     region,
+				Profile:         profile,
+				Profiles:        profiles,
+				Org:             org,
+				AssumeRole:      assumeRole,
+				AssumeRoleArns:  assumeRoleArns,
+				ExternalID:      externalID,
+				RoleSessionName: roleSessionName,
+				Region:          region,
 			})
 			if err != nil {
 				return fmt.Errorf("detect creds: %w", err)
@@ -136,6 +150,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 			_ = eng.SetMeta(ctx, "opt.profiles", strings.Join(profiles, ","))
 			_ = eng.SetMeta(ctx, "opt.org", boolStr(org))
 			_ = eng.SetMeta(ctx, "opt.assume_role", assumeRole)
+			_ = eng.SetMeta(ctx, "opt.assume_role_arns", strings.Join(assumeRoleArns, ","))
+			_ = eng.SetMeta(ctx, "opt.external_id", externalID)
+			_ = eng.SetMeta(ctx, "opt.role_session_name", roleSessionName)
 			_ = eng.SetMeta(ctx, "opt.region", region)
 			_ = eng.SetMeta(ctx, "opt.kind", kind)
 			_ = eng.SetMeta(ctx, "opt.modules", strings.Join(moduleList, ","))
@@ -153,6 +170,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().StringSliceVar(&profiles, "profiles", nil, "Comma-separated profile list")
 	c.Flags().BoolVar(&org, "org", false, "Auto-enumerate Organizations and assume-role into each account")
 	c.Flags().StringVar(&assumeRole, "assume-role", "OrganizationAccountAccessRole", "Role name to assume in org mode")
+	c.Flags().StringSliceVar(&assumeRoleArns, "assume-role-arn", nil, "Cross-account role ARN(s) to assume from --profile (repeatable). For customer-environment access; no Organizations access needed.")
+	c.Flags().StringVar(&externalID, "external-id", "", "ExternalId for sts:AssumeRole (required by many third-party/customer trust policies)")
+	c.Flags().StringVar(&roleSessionName, "role-session-name", "bezosbuster", "Session name for assumed-role sessions (shows up in the customer's CloudTrail)")
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
 	c.Flags().StringVar(&outDir, "out", "engagements", "Parent dir for new engagements")
 	c.Flags().StringVar(&engDir, "engagement", "", "Existing engagement dir to append to (default: create new)")
@@ -290,12 +310,15 @@ func modulesCmd() *cobra.Command {
 // `docker run -p 9194:9194`.
 func steampipeCmd() *cobra.Command {
 	var (
-		profile    string
-		profiles   []string
-		org        bool
-		assumeRole string
-		region     string
-		mod        string
+		profile         string
+		profiles        []string
+		org             bool
+		assumeRole      string
+		assumeRoleArns  []string
+		externalID      string
+		roleSessionName string
+		region          string
+		mod             string
 	)
 	c := &cobra.Command{
 		Use:   "steampipe",
@@ -305,7 +328,7 @@ func steampipeCmd() *cobra.Command {
 			defer cancel()
 
 			// Default to all profiles when no profile flags are given.
-			if profile == "" && len(profiles) == 0 && !org {
+			if profile == "" && len(profiles) == 0 && !org && len(assumeRoleArns) == 0 {
 				all, err := creds.ListProfiles()
 				if err == nil && len(all) > 0 {
 					profiles = all
@@ -313,11 +336,14 @@ func steampipeCmd() *cobra.Command {
 			}
 
 			targets, err := creds.Detect(ctx, creds.Options{
-				Profile:    profile,
-				Profiles:   profiles,
-				Org:        org,
-				AssumeRole: assumeRole,
-				Region:     region,
+				Profile:         profile,
+				Profiles:        profiles,
+				Org:             org,
+				AssumeRole:      assumeRole,
+				AssumeRoleArns:  assumeRoleArns,
+				ExternalID:      externalID,
+				RoleSessionName: roleSessionName,
+				Region:          region,
 			})
 			if err != nil {
 				return fmt.Errorf("detect creds: %w", err)
@@ -357,6 +383,9 @@ func steampipeCmd() *cobra.Command {
 	c.Flags().StringSliceVar(&profiles, "profiles", nil, "Comma-separated profile list")
 	c.Flags().BoolVar(&org, "org", false, "Auto-enumerate Organizations and assume-role into each account")
 	c.Flags().StringVar(&assumeRole, "assume-role", "OrganizationAccountAccessRole", "Role name to assume in org mode")
+	c.Flags().StringSliceVar(&assumeRoleArns, "assume-role-arn", nil, "Cross-account role ARN(s) to assume from --profile (repeatable)")
+	c.Flags().StringVar(&externalID, "external-id", "", "ExternalId for sts:AssumeRole (third-party/customer trust policies)")
+	c.Flags().StringVar(&roleSessionName, "role-session-name", "bezosbuster", "Session name for assumed-role sessions")
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
 	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-perimeter", "Steampipe mod location")
 	return c
@@ -487,6 +516,11 @@ func readScanOpts(ctx context.Context, eng *engagement.Engagement) (scanOpts, er
 	}
 	out.cred.Org = get("opt.org") == "true"
 	out.cred.AssumeRole = get("opt.assume_role")
+	if v := get("opt.assume_role_arns"); v != "" {
+		out.cred.AssumeRoleArns = strings.Split(v, ",")
+	}
+	out.cred.ExternalID = get("opt.external_id")
+	out.cred.RoleSessionName = get("opt.role_session_name")
 	out.cred.Region = get("opt.region")
 	out.kind = get("opt.kind")
 	if v := get("opt.modules"); v != "" {

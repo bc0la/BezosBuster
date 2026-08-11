@@ -82,6 +82,7 @@ ENV PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/
 
 # Switch to non-root for everything else.
 USER bb
+ENV HOME=/home/bb
 WORKDIR /home/bb
 
 # Steampipe AWS plugin + mods (must be installed by the same user that runs steampipe)

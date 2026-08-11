@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/you/bezosbuster/internal/creds"
 	"github.com/you/bezosbuster/internal/findings"
@@ -77,12 +78,12 @@ func Run(ctx context.Context, moduleName string, t creds.AccountTarget, sink fin
 		Title:         title,
 		RawOutputPath: rawDir,
 		Detail: map[string]any{
-			"binary":   binary,
-			"args":     args,
-			"raw_dir":  rawDir,
-			"stdout":   stdoutPath,
-			"stderr":   stderrPath,
-			"exit":     errString(runErr),
+			"binary":  binary,
+			"args":    args,
+			"raw_dir": rawDir,
+			"stdout":  stdoutPath,
+			"stderr":  stderrPath,
+			"exit":    errString(runErr),
 		},
 	})
 	return nil
@@ -95,19 +96,41 @@ func errString(e error) string {
 	return e.Error()
 }
 
+// buildAWSEnv inherits the real process environment (so PATH/HOME resolve
+// correctly whether we run as a native binary or inside the Docker image),
+// then strips any ambient AWS_* identity vars and injects the concrete
+// per-account credentials for this target. Stripping AWS_PROFILE et al. is
+// essential: a stale profile in the environment would otherwise override the
+// assumed-role credentials we hand each external tool.
 func buildAWSEnv(ctx context.Context, t creds.AccountTarget) ([]string, error) {
 	v, err := t.Config.Credentials.Retrieve(ctx)
 	if err != nil {
 		return nil, errors.New("retrieve credentials: " + err.Error())
 	}
-	env := []string{
-		"AWS_ACCESS_KEY_ID=" + v.AccessKeyID,
-		"AWS_SECRET_ACCESS_KEY=" + v.SecretAccessKey,
-		"AWS_DEFAULT_REGION=" + t.Config.Region,
-		"AWS_REGION=" + t.Config.Region,
-		"PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-		"HOME=/home/bb",
+	drop := []string{
+		"AWS_PROFILE=", "AWS_DEFAULT_PROFILE=",
+		"AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY=", "AWS_SESSION_TOKEN=",
+		"AWS_REGION=", "AWS_DEFAULT_REGION=",
 	}
+	var env []string
+	for _, e := range os.Environ() {
+		skip := false
+		for _, p := range drop {
+			if strings.HasPrefix(e, p) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			env = append(env, e)
+		}
+	}
+	env = append(env,
+		"AWS_ACCESS_KEY_ID="+v.AccessKeyID,
+		"AWS_SECRET_ACCESS_KEY="+v.SecretAccessKey,
+		"AWS_DEFAULT_REGION="+t.Config.Region,
+		"AWS_REGION="+t.Config.Region,
+	)
 	if v.SessionToken != "" {
 		env = append(env, "AWS_SESSION_TOKEN="+v.SessionToken)
 	}

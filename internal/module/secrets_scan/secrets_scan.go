@@ -84,7 +84,7 @@ type sample struct {
 
 // kfFinding matches kingfisher's nested JSON output structure.
 type kfFinding struct {
-	Rule    kfRule    `json:"rule"`
+	Rule    kfRule   `json:"rule"`
 	Finding kfDetail `json:"finding"`
 }
 
@@ -112,7 +112,12 @@ type kfReport struct {
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
 	kfPath, err := exec.LookPath("kingfisher")
 	if err != nil {
-		return fmt.Errorf("kingfisher not on PATH — install in Docker image: %w", err)
+		// Degrade gracefully like the collect wrappers: warn and skip rather
+		// than fail the module. Lets the native binary run `scan` clean; use
+		// the Docker image (kingfisher baked in) or `--no-secrets` otherwise.
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
+			"kingfisher not on PATH — skipping secrets_scan (install kingfisher, use the Docker image, or pass --no-secrets)")
+		return nil
 	}
 
 	regions := awsapi.EnabledRegions(ctx, t.Config)

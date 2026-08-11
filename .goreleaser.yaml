@@ -1,0 +1,60 @@
+# GoReleaser builds the native, static, CGO-free binaries that are the daily
+# driver for `scan` / `report` / `resume`. The Docker image (Dockerfile +
+# .github/workflows/docker.yml) still ships alongside these for the external
+# tools that `collect` / `steampipe` / `secrets_scan` shell out to.
+#
+# Local dry run:  goreleaser release --snapshot --clean
+version: 2
+
+project_name: bezosbuster
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: bezosbuster
+    main: ./cmd/bezosbuster
+    binary: bezosbuster
+    env:
+      - CGO_ENABLED=0            # pure-Go sqlite (modernc) → fully static, cross-compiles clean
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .ShortCommit }}
+      - -X main.date={{ .Date }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: bezosbuster
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+release:
+  draft: false
+  prerelease: auto
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
