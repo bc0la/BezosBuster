@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -90,6 +91,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 		noSecrets          bool
 		noS3               bool
 		secretsTimeoutMins int
+		dockerForce        bool
+		dockerImage        string
+		dockerPull         bool
 	)
 	c := &cobra.Command{
 		Use:   use,
@@ -97,6 +101,34 @@ func runCmd(use, short, kind string) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+
+			// `collect` is the external-tool "zoo". When those tools aren't
+			// installed locally, transparently delegate the whole run into the
+			// batteries-included Docker image with the right mounts/flags, so
+			// the user never hand-writes docker flags. `scan` (native) never
+			// delegates.
+			if kind == "external" {
+				mode := dockerMode(cmd.Flags().Changed("docker"), dockerForce)
+				if use, reason := wantDocker(mode, "scout"); use {
+					fmt.Fprintf(os.Stderr, "collect: %s — delegating to Docker\n", reason)
+					sub, hostDir, err := containerArgs("collect", collectFlags{
+						profile: profile, profiles: profiles, org: org,
+						assumeRole: assumeRole, assumeRoleArns: assumeRoleArns,
+						externalID: externalID, roleSessionName: roleSessionName,
+						region: region, outDir: outDir, engDir: engDir,
+						moduleList: moduleList, noTUI: noTUI, noSecrets: noSecrets,
+						noS3: noS3, secretsTimeoutMins: secretsTimeoutMins,
+					})
+					if err != nil {
+						return err
+					}
+					return runInDocker(ctx, dockerPlan{
+						image: dockerImage, subArgs: sub, hostDir: hostDir, pull: dockerPull,
+					})
+				} else {
+					fmt.Fprintf(os.Stderr, "collect: %s\n", reason)
+				}
+			}
 
 			targets, err := creds.Detect(ctx, creds.Options{
 				Profile:         profile,
@@ -181,7 +213,97 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
 	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
 	c.Flags().IntVar(&secretsTimeoutMins, "secrets-timeout", 0, "Per-collector timeout in minutes for secrets_scan (0 = disabled). Partial results are kept.")
+	if kind == "external" {
+		c.Flags().BoolVar(&dockerForce, "docker", false, "Run inside the bezosbuster Docker image (auto: used when the external tools aren't installed locally). --docker forces it; --docker=false disables. Auto-mounts ~/.aws and the engagements dir.")
+		c.Flags().StringVar(&dockerImage, "docker-image", DefaultDockerImage, "Image to use when delegating to Docker")
+		c.Flags().BoolVar(&dockerPull, "docker-pull", false, "Force `docker pull` before running (otherwise the image is pulled only if absent)")
+	}
 	return c
+}
+
+// collectFlags carries the parsed collect flags so containerArgs can translate
+// them back into a command line for the in-container run.
+type collectFlags struct {
+	profile            string
+	profiles           []string
+	org                bool
+	assumeRole         string
+	assumeRoleArns     []string
+	externalID         string
+	roleSessionName    string
+	region             string
+	outDir             string
+	engDir             string
+	moduleList         []string
+	noTUI              bool
+	noSecrets          bool
+	noS3               bool
+	secretsTimeoutMins int
+}
+
+// containerArgs rebuilds the subcommand + flags to run inside the image, and
+// returns the host directory to bind-mount at /data. Engagement paths are
+// rewritten to their /data-relative form so an existing engagement created by a
+// host-side `scan` is picked up inside the container.
+func containerArgs(sub string, f collectFlags) ([]string, string, error) {
+	a := []string{sub}
+	if f.profile != "" {
+		a = append(a, "--profile", f.profile)
+	}
+	if len(f.profiles) > 0 {
+		a = append(a, "--profiles", strings.Join(f.profiles, ","))
+	}
+	if f.org {
+		a = append(a, "--org")
+	}
+	if f.assumeRole != "" {
+		a = append(a, "--assume-role", f.assumeRole)
+	}
+	for _, arn := range f.assumeRoleArns {
+		a = append(a, "--assume-role-arn", arn)
+	}
+	if f.externalID != "" {
+		a = append(a, "--external-id", f.externalID)
+	}
+	if f.roleSessionName != "" {
+		a = append(a, "--role-session-name", f.roleSessionName)
+	}
+	if f.region != "" {
+		a = append(a, "--region", f.region)
+	}
+	if len(f.moduleList) > 0 {
+		a = append(a, "--modules", strings.Join(f.moduleList, ","))
+	}
+	if f.noTUI {
+		a = append(a, "--no-tui")
+	}
+	if f.noSecrets {
+		a = append(a, "--no-secrets")
+	}
+	if f.noS3 {
+		a = append(a, "--no-s3")
+	}
+	if f.secretsTimeoutMins > 0 {
+		a = append(a, "--secrets-timeout", strconv.Itoa(f.secretsTimeoutMins))
+	}
+
+	var hostDir string
+	if f.engDir != "" {
+		abs, err := filepath.Abs(f.engDir)
+		if err != nil {
+			return nil, "", err
+		}
+		hostDir = filepath.Dir(abs)
+		a = append(a, "--engagement", "/data/"+filepath.Base(abs))
+	} else {
+		abs, err := filepath.Abs(f.outDir)
+		if err != nil {
+			return nil, "", err
+		}
+		hostDir = abs
+		a = append(a, "--out", "/data")
+	}
+	return a, hostDir, nil
 }
 
 // selectModules returns the final list of module names to run given a kind
@@ -319,6 +441,9 @@ func steampipeCmd() *cobra.Command {
 		roleSessionName string
 		region          string
 		mod             string
+		dockerForce     bool
+		dockerImage     string
+		dockerPull      bool
 	)
 	c := &cobra.Command{
 		Use:   "steampipe",
@@ -326,6 +451,47 @@ func steampipeCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
+
+			// steampipe needs the tool + its AWS plugin; when it isn't installed
+			// locally, delegate into the image (which also publishes :9194 and
+			// mounts ~/.aws for you).
+			mode := dockerMode(cmd.Flags().Changed("docker"), dockerForce)
+			useDocker, reason := wantDocker(mode, "steampipe")
+			if useDocker {
+				fmt.Fprintf(os.Stderr, "steampipe: %s — delegating to Docker\n", reason)
+				sub := []string{"steampipe"}
+				if profile != "" {
+					sub = append(sub, "--profile", profile)
+				}
+				if len(profiles) > 0 {
+					sub = append(sub, "--profiles", strings.Join(profiles, ","))
+				}
+				if org {
+					sub = append(sub, "--org")
+				}
+				if assumeRole != "" {
+					sub = append(sub, "--assume-role", assumeRole)
+				}
+				for _, arn := range assumeRoleArns {
+					sub = append(sub, "--assume-role-arn", arn)
+				}
+				if externalID != "" {
+					sub = append(sub, "--external-id", externalID)
+				}
+				if roleSessionName != "" {
+					sub = append(sub, "--role-session-name", roleSessionName)
+				}
+				if region != "" {
+					sub = append(sub, "--region", region)
+				}
+				return runInDocker(ctx, dockerPlan{
+					image:   dockerImage,
+					subArgs: sub,
+					ports:   []string{"9194:9194"},
+					pull:    dockerPull,
+				})
+			}
+			fmt.Fprintf(os.Stderr, "steampipe: %s\n", reason)
 
 			// Default to all profiles when no profile flags are given.
 			if profile == "" && len(profiles) == 0 && !org && len(assumeRoleArns) == 0 {
@@ -388,6 +554,9 @@ func steampipeCmd() *cobra.Command {
 	c.Flags().StringVar(&roleSessionName, "role-session-name", "bezosbuster", "Session name for assumed-role sessions")
 	c.Flags().StringVar(&region, "region", "us-east-1", "Default region for IAM/org calls")
 	c.Flags().StringVar(&mod, "mod", "/home/bb/mods/steampipe-mod-aws-perimeter", "Steampipe mod location")
+	c.Flags().BoolVar(&dockerForce, "docker", false, "Run inside the bezosbuster Docker image (auto: used when steampipe isn't installed locally). --docker forces it; --docker=false disables. Publishes :9194 and mounts ~/.aws.")
+	c.Flags().StringVar(&dockerImage, "docker-image", DefaultDockerImage, "Image to use when delegating to Docker")
+	c.Flags().BoolVar(&dockerPull, "docker-pull", false, "Force `docker pull` before running (otherwise the image is pulled only if absent)")
 	return c
 }
 

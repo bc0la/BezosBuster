@@ -144,8 +144,10 @@ bezosbuster scan --profile hub \
   --external-id "acme-2026-Xf9..."
 # → prints the engagement dir, e.g. engagements/2026-08-10-143022-111122223333
 
-# Heavy external tools into the SAME engagement dir (needs the Docker image).
-bb collect --engagement /data/2026-08-10-143022-111122223333 \
+# Heavy external tools into the SAME engagement dir. If the tools aren't
+# installed locally, `collect` transparently runs itself inside the Docker
+# image — pulling it and wiring up ~/.aws + the engagements mount for you.
+bezosbuster collect --engagement engagements/2026-08-10-143022-111122223333 \
   --profile hub \
   --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
   --external-id "acme-2026-Xf9..."
@@ -157,8 +159,9 @@ bezosbuster report engagements/2026-08-10-143022-111122223333
 aws sso login --profile hub
 bezosbuster resume engagements/2026-08-10-143022-111122223333
 
-# Live multi-account Steampipe dashboard (needs the Docker image).
-bb-steampipe --profile hub \
+# Live multi-account Steampipe dashboard. Same deal — delegates into the
+# image (publishing :9194 and mounting ~/.aws) when steampipe isn't local.
+bezosbuster steampipe --profile hub \
   --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
   --external-id "acme-2026-Xf9..."
 
@@ -309,6 +312,33 @@ bb scan --profile dev --engagement /data/2026-04-11-143022-111122223333
 ### 2. `collect` — external tools (slow)
 
 Identical flags to `scan`, but runs modules where `Kind() == external`: ScoutSuite, Blue-CloudPEASS, Pacu cognito, `steampipe_insights`, `steampipe_perimeter`. These subprocess out to the real tools and can take minutes to hours.
+
+**Auto-delegates to Docker.** `collect` is the external-tool "zoo", and those
+tools are a pain to install natively. So when the flagship tool (`scout`) isn't
+on your `PATH`, `collect` re-runs *itself* inside the batteries-included image —
+pulling the image if needed and wiring up the flags you'd otherwise type by hand:
+`~/.aws` mounted read-only, the engagements dir bind-mounted at `/data`, your
+`AWS_*` env forwarded, and an interactive TTY for the progress UI. You just run:
+
+```bash
+bezosbuster collect --profile hub \
+  --assume-role-arn arn:aws:iam::111122223333:role/SecurityAudit \
+  --external-id "acme-2026-Xf9..."
+```
+
+| Flag | Effect |
+|---|---|
+| *(default)* | **auto** — delegate to Docker only if `scout` isn't installed locally and `docker` is available; otherwise run in-process. |
+| `--docker` | Force delegation into the image. |
+| `--docker=false` | Never delegate; run in-process (missing tools are skipped with a warning). |
+| `--docker-image REF` | Override the image (default `ghcr.io/bc0la/bezosbuster:latest`). |
+| `--docker-pull` | `docker pull` before running (otherwise pulled only if absent). |
+
+The credential flags (`--profile`, `--assume-role-arn`, `--external-id`, …) are
+forwarded into the container, so your hub-into-customer assume-role flow works
+identically whether or not it runs in Docker. Recursion is guarded by a
+`BB_IN_DOCKER=1` env marker set on the delegated run. The `steampipe` subcommand
+delegates the same way (additionally publishing `:9194`).
 
 **Where output goes:** not the SQLite DB. Each wrapper writes directly to `<engagement-dir>/<module>/<account>/`:
 
