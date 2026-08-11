@@ -198,6 +198,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						ResourceARN: aws.ToString(fn.FunctionArn),
 						Title:       fmt.Sprintf("Lambda %s: %s", name, title),
 						Detail: map[string]any{
+							"check":          "lambda_resource_policy",
 							"function":       name,
 							"statement":      st,
 							"anonymous":      anon,
@@ -227,6 +228,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						ResourceARN: aws.ToString(fn.FunctionArn),
 						Title:       fmt.Sprintf("Lambda %s: function URL with no auth", aws.ToString(fn.FunctionName)),
 						Detail: map[string]any{
+							"check":    "lambda_function_url_no_auth",
 							"function": aws.ToString(fn.FunctionName),
 							"url":      fnURL,
 							"auth":     string(u.AuthType),
@@ -303,6 +305,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 								ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
 								Title:       fmt.Sprintf("REST API %s: %s", apiName, title),
 								Detail: map[string]any{
+									"check":          "restapi_resource_policy",
 									"api_id":         apiID,
 									"api_name":       apiName,
 									"resource":       res,
@@ -372,6 +375,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 								ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/restapis/%s", region, apiID),
 								Title:       fmt.Sprintf("REST API %s: %s %s has no auth", apiName, httpMethod, path),
 								Detail: map[string]any{
+									"check":            "restapi_method_no_auth",
 									"api_id":           apiID,
 									"api_name":         apiName,
 									"method":           httpMethod,
@@ -428,6 +432,7 @@ func scanRegion(ctx context.Context, t creds.AccountTarget, region string, sink 
 						ResourceARN: fmt.Sprintf("arn:aws:apigateway:%s::/apis/%s", region, apiID),
 						Title:       fmt.Sprintf("APIGWv2 %s: route %s has no auth", apiName, routeKey),
 						Detail: map[string]any{
+							"check":     "apigwv2_route_no_auth",
 							"api_id":    apiID,
 							"api_name":  apiName,
 							"route_key": routeKey,

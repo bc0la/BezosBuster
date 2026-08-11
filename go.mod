@@ -3,7 +3,7 @@ module github.com/you/bezosbuster
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.41.7
+	github.com/aws/aws-sdk-go-v2 v1.43.5
 	github.com/aws/aws-sdk-go-v2/config v1.32.14
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.14
 	github.com/aws/aws-sdk-go-v2/service/amplify v1.38.14
@@ -14,6 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/bedrock v1.59.2
 	github.com/aws/aws-sdk-go-v2/service/bedrockagent v1.53.2
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.71.9
+	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.64.0
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.69.0
 	github.com/aws/aws-sdk-go-v2/service/codebuild v1.68.13
 	github.com/aws/aws-sdk-go-v2/service/codepipeline v1.46.21
@@ -23,14 +24,17 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ecrpublic v1.38.13
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.78.0
 	github.com/aws/aws-sdk-go-v2/service/elasticbeanstalk v1.34.2
+	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.54.12
 	github.com/aws/aws-sdk-go-v2/service/emr v1.59.0
 	github.com/aws/aws-sdk-go-v2/service/glue v1.139.2
 	github.com/aws/aws-sdk-go-v2/service/iam v1.53.7
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.89.0
+	github.com/aws/aws-sdk-go-v2/service/opensearch v1.75.5
 	github.com/aws/aws-sdk-go-v2/service/opensearchserverless v1.30.3
 	github.com/aws/aws-sdk-go-v2/service/organizations v1.51.1
 	github.com/aws/aws-sdk-go-v2/service/rds v1.117.1
 	github.com/aws/aws-sdk-go-v2/service/redshift v1.62.5
+	github.com/aws/aws-sdk-go-v2/service/route53 v1.62.7
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/aws/aws-sdk-go-v2/service/sagemaker v1.240.0
 	github.com/aws/aws-sdk-go-v2/service/sfn v1.40.10
@@ -38,7 +42,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.42.25
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.68.4
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.10
-	github.com/aws/smithy-go v1.25.1
+	github.com/aws/smithy-go v1.27.7
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/spf13/cobra v1.10.2
@@ -48,17 +52,15 @@ require (
 require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.21 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.23 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.36 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.36 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.6 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.22 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.64.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.54.12 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.7 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.9.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.21 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.21 // indirect
-	github.com/aws/aws-sdk-go-v2/service/route53 v1.62.7 // indirect
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.44.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.0.9 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.30.15 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.35.19 // indirect
