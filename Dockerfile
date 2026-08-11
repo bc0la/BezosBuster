@@ -34,12 +34,18 @@ RUN curl -fsSL https://powerpipe.io/install/powerpipe.sh -o /tmp/powerpipe.sh \
  && bash /tmp/powerpipe.sh \
  && rm /tmp/powerpipe.sh
 
-# Kingfisher secret scanner (latest release binary)
+# Kingfisher secret scanner — pinned, downloaded straight from the release asset
+# (the unauthenticated GitHub API rate-limits CI runners with a 403). TARGETARCH
+# is provided by buildx; pick the matching x64/arm64 asset.
+ARG KINGFISHER_VERSION=1.112.0
+ARG TARGETARCH
 RUN set -eux; \
-    SUFFIX="linux-x64.tgz"; \
-    LATEST_URL=$(curl -fsSL https://api.github.com/repos/mongodb/kingfisher/releases/latest \
-        | grep -Eo "https://[^\"]*${SUFFIX}"); \
-    curl -fsSL "$LATEST_URL" -o /tmp/kingfisher.tgz; \
+    case "${TARGETARCH}" in \
+      amd64) KF_ARCH=x64 ;; \
+      arm64) KF_ARCH=arm64 ;; \
+      *) KF_ARCH=x64 ;; \
+    esac; \
+    curl -fsSL "https://github.com/mongodb/kingfisher/releases/download/v${KINGFISHER_VERSION}/kingfisher-linux-${KF_ARCH}.tgz" -o /tmp/kingfisher.tgz; \
     cd /tmp && tar -xzf kingfisher.tgz; \
     KF_PATH=$(find /tmp -type f -name 'kingfisher*' -executable -print -quit); \
     mv "$KF_PATH" /usr/local/bin/kingfisher; \
