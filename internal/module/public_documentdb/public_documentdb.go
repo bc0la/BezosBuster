@@ -36,6 +36,11 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 				break
 			}
 			for _, db := range page.DBInstances {
+				// The docdb endpoint returns DocumentDB instances; guard on the
+				// engine so a shared control-plane response can't mislabel one.
+				if aws.ToString(db.Engine) != "docdb" {
+					continue
+				}
 				if !aws.ToBool(db.PubliclyAccessible) {
 					continue
 				}

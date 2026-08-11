@@ -30,6 +30,7 @@ import (
 	_ "github.com/you/bezosbuster/internal/module/cognito"
 	_ "github.com/you/bezosbuster/internal/module/ec2_imdsv1"
 	_ "github.com/you/bezosbuster/internal/module/ec2_userdata"
+	_ "github.com/you/bezosbuster/internal/module/ecr_repo_policy"
 	_ "github.com/you/bezosbuster/internal/module/ecs_ecr_taskdefs"
 	_ "github.com/you/bezosbuster/internal/module/iam_integrations"
 	_ "github.com/you/bezosbuster/internal/module/kms_key_exposure"

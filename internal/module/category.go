@@ -51,6 +51,7 @@ var moduleCategory = map[string]string{
 	"public_mq":          "exposure",
 	"public_msk":         "exposure",
 	"public_ecr":         "exposure",
+	"ecr_repo_policy":    "exposure",
 	"public_amis":        "exposure",
 	"public_snapshots":   "exposure",
 	"public_sns":         "exposure",
