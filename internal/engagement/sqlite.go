@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/you/bezosbuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/findings"
 
 	_ "modernc.org/sqlite"
 )

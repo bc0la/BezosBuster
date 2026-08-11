@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/you/bezosbuster/internal/engagement"
-	"github.com/you/bezosbuster/internal/module"
+	"github.com/bc0la/BezosBuster/internal/engagement"
+	"github.com/bc0la/BezosBuster/internal/module"
 
 	_ "modernc.org/sqlite"
 )

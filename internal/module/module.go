@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/you/bezosbuster/internal/creds"
-	"github.com/you/bezosbuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/creds"
+	"github.com/bc0la/BezosBuster/internal/findings"
 )
 
 type Kind string

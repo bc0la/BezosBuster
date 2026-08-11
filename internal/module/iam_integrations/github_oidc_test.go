@@ -3,7 +3,7 @@ package iam_integrations
 import (
 	"testing"
 
-	"github.com/you/bezosbuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/findings"
 )
 
 func TestAnalyzeGitHubSub(t *testing.T) {

@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/you/bezosbuster/internal/creds"
-	"github.com/you/bezosbuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/creds"
+	"github.com/bc0la/BezosBuster/internal/findings"
 )
 
 // ArgBuilder produces a command-line argument list given the raw output

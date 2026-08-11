@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/you/bezosbuster/internal/orchestrator"
+	"github.com/bc0la/BezosBuster/internal/orchestrator"
 )
 
 type tab int

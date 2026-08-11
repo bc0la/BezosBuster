@@ -25,9 +25,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/route53"
 	r53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
 
-	"github.com/you/bezosbuster/internal/creds"
-	"github.com/you/bezosbuster/internal/findings"
-	"github.com/you/bezosbuster/internal/module"
+	"github.com/bc0la/BezosBuster/internal/creds"
+	"github.com/bc0la/BezosBuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/module"
 )
 
 //go:embed fingerprints.json

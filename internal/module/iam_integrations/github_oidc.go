@@ -3,7 +3,7 @@ package iam_integrations
 import (
 	"strings"
 
-	"github.com/you/bezosbuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/findings"
 )
 
 // GitHub Actions OIDC issuer.

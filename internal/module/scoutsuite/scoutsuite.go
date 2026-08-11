@@ -3,10 +3,10 @@ package scoutsuite
 import (
 	"context"
 
-	"github.com/you/bezosbuster/internal/creds"
-	"github.com/you/bezosbuster/internal/findings"
-	"github.com/you/bezosbuster/internal/module"
-	"github.com/you/bezosbuster/internal/module/exttool"
+	"github.com/bc0la/BezosBuster/internal/creds"
+	"github.com/bc0la/BezosBuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/module"
+	"github.com/bc0la/BezosBuster/internal/module/exttool"
 )
 
 type Module struct{}

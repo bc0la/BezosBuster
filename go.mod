@@ -1,4 +1,4 @@
-module github.com/you/bezosbuster
+module github.com/bc0la/BezosBuster
 
 go 1.25.0
 

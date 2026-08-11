@@ -47,7 +47,12 @@ the external tools the heavier commands shell out to.
 tar -xzf bezosbuster_*_linux_amd64.tar.gz
 sudo install bezosbuster /usr/local/bin/
 
-# or build from source
+# or install the latest tagged release straight from source (Go 1.25+):
+go install github.com/bc0la/BezosBuster/cmd/bezosbuster@latest
+#   → drops `bezosbuster` in $(go env GOBIN) (usually ~/go/bin — put it on PATH).
+#   Pin a version with @v0.2.10 instead of @latest.
+
+# or build from a local clone:
 go build -o bezosbuster ./cmd/bezosbuster
 
 bezosbuster scan --profile my-sso-profile
@@ -692,7 +697,7 @@ type Sink interface {
 }
 ```
 
-Add a new check: drop a package under `internal/module/<name>/`, put `func init() { module.Register(Module{}) }` at package level, and add a `_ "github.com/you/bezosbuster/internal/module/<name>"` side-effect import in `cmd/bezosbuster/main.go`.
+Add a new check: drop a package under `internal/module/<name>/`, put `func init() { module.Register(Module{}) }` at package level, and add a `_ "github.com/bc0la/BezosBuster/internal/module/<name>"` side-effect import in `cmd/bezosbuster/main.go`.
 
 ## Layout
 

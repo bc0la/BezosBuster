@@ -8,10 +8,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecs"
 	ecstypes "github.com/aws/aws-sdk-go-v2/service/ecs/types"
 
-	"github.com/you/bezosbuster/internal/awsapi"
-	"github.com/you/bezosbuster/internal/creds"
-	"github.com/you/bezosbuster/internal/findings"
-	"github.com/you/bezosbuster/internal/module"
+	"github.com/bc0la/BezosBuster/internal/awsapi"
+	"github.com/bc0la/BezosBuster/internal/creds"
+	"github.com/bc0la/BezosBuster/internal/findings"
+	"github.com/bc0la/BezosBuster/internal/module"
 )
 
 type Module struct{}
