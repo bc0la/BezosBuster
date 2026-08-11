@@ -447,9 +447,14 @@ function renderAll() {
   renderTable();
 }
 
-// ---- Exports (operate on the current section, excluding false positives) -
+// ---- Exports (operate on what's actually shown: current section/module,
+// minus false positives, minus checks toggled off, minus the text filter) ----
 function visibleForExport() {
-  return rowsForSection(currentSection === FP_SECTION ? '' : currentSection, currentModule, false);
+  const section = currentSection === FP_SECTION ? '' : currentSection;
+  let rows = applyCheckFilter(rowsForSection(section, currentModule, false));
+  const filter = document.getElementById('filter').value.toLowerCase();
+  if (filter) rows = rows.filter(f => f._search.includes(filter));
+  return rows;
 }
 
 function exportCurls() {

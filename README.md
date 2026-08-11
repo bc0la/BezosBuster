@@ -14,7 +14,7 @@ Whitebox AWS engagements repeat the same toolchain and follow-ups every time. Cr
 - **`scan` / `collect` split** — `scan` runs native `aws-sdk-go-v2` checks (fast, in-process); `collect` runs external tools (slow, subprocess). Same flags, same engagement dir.
 - **Wraps existing tools**: ScoutSuite, Blue-CloudPEASS, `steampipe-mod-aws-insights`, `steampipe-mod-aws-perimeter`, Pacu cognito enum.
 - **Native follow-up checks** via `aws-sdk-go-v2`:
-  - Public AMIs, public EBS snapshots, public RDS (with TCP probe), public ECR.
+  - **Public-exposure family**: public AMIs; public EBS **and RDS** snapshots; publicly-accessible RDS, Redshift, DocumentDB, Neptune (all TCP-probed); public ECR; public SNS/SQS; anonymously-readable S3; OpenSearch/Elasticsearch domains with wildcard access policies; Amazon MQ brokers and MSK (Kafka) clusters with public access; KMS keys whose key policy grants `*`/external-account access.
   - Lambda environment variables (all functions, secret-like key/value regex).
   - ECS / ECR task definitions.
   - Roles with `AssumeRoleWithWebIdentity` and their trust policies/conditions.
@@ -263,15 +263,10 @@ Either way, when the assumed-role session expires mid-scan the usual
 
 The fast path. Everything runs in-process against the AWS SDK; typical run is seconds to minutes. This is what you want first on any engagement.
 
-**What runs** (all 9 modules where `Kind() == native`):
+**What runs** (every module where `Kind() == native` — 26 of them; the report UI groups them into four sections: Best Practices, Secrets Management, IAM & Access, Public Exposure). Highlights:
 - `apigw_lambda` — API Gateway + Lambda anonymous-reach + wildcard-crossing ARN analyzer.
-- `public_amis` — `DescribeImages --executable-users all`, filtered to `Owners=self`.
-- `public_snapshots` — `DescribeSnapshots --restorable-by-user-ids all`, filtered to `Owners=self`.
-- `public_rds` — `DescribeDBInstances` + TCP connect probe to the endpoint.
-- `public_ecr` — `ecr-public:DescribeRepositories` (us-east-1 only, that's where public ECR lives).
-- `lambda_env` — dumps all Lambda env vars, flags secret-like keys/values.
-- `ecs_ecr_taskdefs` — active ECS task definitions with containers, images, env, task/exec roles.
-- `web_identity` — IAM roles trusting `sts:AssumeRoleWithWebIdentity`, flagged critical if the trust policy has no `Condition`.
+- **Public-exposure family** — `public_amis`, `public_snapshots` (public EBS **and** manual RDS DB/cluster snapshots shared with `all`), `public_rds`, `public_redshift`, `public_documentdb`, `public_neptune` (all TCP-probed), `public_ecr`, `public_sns`, `public_sqs`, `s3_anon`, `public_opensearch` (OpenSearch/ES domains with a wildcard access policy on a public endpoint), `public_mq` (Amazon MQ brokers), `public_msk` (MSK/Kafka public access), `kms_key_exposure` (key policies granting `*`/external-account access).
+- `secrets_scan` + env collectors (`lambda_env`, `ec2_userdata`, `codebuild_env`, `ecs_ecr_taskdefs`, `ssm_commands`) — Kingfisher-backed secret detection across ~20 sources.
 - `iam_integrations` — comprehensive identity federation review. Enumerates SAML + OIDC providers; cross-references them against role trust policies; condition-aware analysis of every `sts:AssumeRole` / `sts:AssumeRoleWithWebIdentity` / `sts:AssumeRoleWithSAML` statement; **deep GitHub Actions `:sub` claim analysis** (catches `repo:*` / `repo:org/*` / wildcard owners / missing `:aud` / missing `:sub` / pull-request subjects); SAML metadata expiry; orphaned providers; Cognito identity pools with `AllowUnauthenticatedIdentities=true` or classic flow; wildcard principals.
 
 **Order of operations:**
@@ -400,7 +395,7 @@ Embedded SPA served over HTTP. Reads `<dir>/engagement.db` for findings and serv
 3. `sql.Open("sqlite", dbPath)`.
 4. Register routes:
    - `GET /` → embedded `index.html`.
-   - `GET /api/summary` → `{"modules":[{module,count}], "severity":{...}}` grouped over the `findings` table.
+   - `GET /api/summary` → `{"modules":[{module,count,category}], "severity":{...}, "categories":[{key,label}]}` grouped over the `findings` table. `category` maps each module to one of the four UI sections (single source of truth: `internal/module/category.go`).
    - `GET /api/findings?module=X` → flattened finding rows with parsed `detail`. `raw_output_path` is rewritten from the absolute path stored in the DB to a `/raw/<rel>/` URL (via `filepath.Rel`) so the link resolves under the static handler.
    - `GET /raw/...` → `http.FileServer(http.Dir(<engagement-dir>))` with `/raw/` stripped. Traversal outside the engagement dir is blocked by `http.Dir`.
 5. `http.ListenAndServe(addr, mux)`.
@@ -421,11 +416,14 @@ docker run --rm -it \
 With the `bb-report` alias above: `bb-report /data/<dir>`.
 
 **What the UI shows:**
-- Severity chips at the top (critical/high/medium/low/info counts).
-- One tab per module plus an "All" tab.
-- Sortable/filterable table: severity, account, region, module, title, resource, raw, detail.
+- **Four category sections** — Best Practices, Secrets Management, IAM & Access, Public Exposure — plus an "All" tab and a **False Positives** tab. Selecting a section reveals its module chips for further narrowing. Section/module/severity counts are computed client-side (findings are loaded once), so switching tabs is instant and the counts never drift.
+- **False Positives workflow** — the `x` on a row moves the finding into the False Positives tab (localStorage-backed, per-analyst, non-destructive) rather than hiding it; each row there has a **Restore** button, plus **Restore-all** for the current view.
+- **Per-check filter** — a `checks:` toggle bar (present in every view including False Positives) splits modules that emit several sub-checks (e.g. `iam_integrations`, `apigw_lambda`, `public_snapshots`) so you can filter noisy checks out fast. It also drives what the **export** buttons emit.
+- Severity chips reflecting the current section/module.
+- Sortable/filterable table with resizable columns: severity, account, region, module, title, resource, raw, detail.
 - "raw" column has a `browse` link for findings with raw output (tool wrappers) — opens `/raw/<module>/<account>/` so you can navigate ScoutSuite's HTML bundle or download `results.json`.
 - "detail" column is a collapsible `<details>` block with the full `detail_json`.
+- Export buttons (curls / JSON / assets) that honor the current section, module, check filter, and text filter (and always exclude false positives).
 
 ---
 
@@ -621,12 +619,16 @@ internal/
   creds/                  credential detection, SSO refresh, org enumeration
   orchestrator/           scheduler, per-account + global semaphores
   module/                 Module interface + registry
+    category.go           module -> UI section map (single source of truth)
     apigw_lambda/         API Gateway wildcard analyzer (canonical native check)
     iam_integrations/     SAML/OIDC providers, trust policies, Cognito pools
-    public_amis/ public_snapshots/ public_rds/ public_ecr/
-    lambda_env/ ecs_ecr_taskdefs/ web_identity/
+    public_amis/ public_snapshots/ public_rds/ public_redshift/
+    public_documentdb/ public_neptune/ public_mq/ public_msk/
+    public_opensearch/ public_ecr/ public_sns/ public_sqs/ s3_anon/
+    kms_key_exposure/
+    lambda_env/ ecs_ecr_taskdefs/ secrets_scan/
     exttool/              shared helper for external-tool wrappers
-    scoutsuite/ bluecloudpeass/ steampipe_insights/ steampipe_perimeter/
+    scoutsuite/ bluecloudpeass/ steampipe_perimeter/
     pacu_cognito/
   findings/               Finding + Sink types
   tui/                    Bubble Tea app

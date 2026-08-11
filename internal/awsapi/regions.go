@@ -2,11 +2,29 @@ package awsapi
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
+
+// DialTCP reports whether host:port accepts a TCP connection within a short
+// timeout. Used to raise a "publicly accessible" flag to "confirmed reachable".
+func DialTCP(ctx context.Context, host string, port int32) bool {
+	if host == "" || port <= 0 {
+		return false
+	}
+	d := net.Dialer{Timeout: 3 * time.Second}
+	c, err := d.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host, port))
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
 
 // EnabledRegions returns the list of regions enabled for the account backing cfg.
 // Falls back to a sensible commercial-region default if DescribeRegions fails.
