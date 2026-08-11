@@ -179,6 +179,46 @@ bezosbuster scan --profile hub \
 against the registry (unknown names are ignored), and are recorded in the
 engagement's `meta` so `resume` reproduces the same selection.
 
+#### All modules
+
+Names below are exactly what you pass to `--modules` / `--exclude`. **Kind**:
+`native` runs under `scan`, `external` under `collect`. **Section** is the
+report-UI grouping; **rating** is the realistic worst-case potential severity.
+
+| Module | Kind | Section | Rating | What it flags |
+|---|---|---|---|---|
+| `scoutsuite` | external | Best Practices | high | ScoutSuite multi-service benchmark (full HTML/JSON report bundle) |
+| `steampipe_perimeter` | external | Best Practices | high | `steampipe-mod-aws-perimeter` internet-exposure benchmarks |
+| `ec2_imdsv1` | native | Best Practices | medium | EC2 instances that still allow IMDSv1 (SSRF → credential-theft prerequisite) |
+| `bedrock` | native | Best Practices | medium | Amazon Bedrock misconfigurations exposing GenAI resources / weak guardrails |
+| `s3_anon` | native | Public Exposure | critical | S3 buckets anonymously listable / public objects, confirmed with unauthenticated probes |
+| `public_rds` | native | Public Exposure | critical | RDS instances & clusters `PubliclyAccessible` (TCP-probed) |
+| `public_opensearch` | native | Public Exposure | critical | OpenSearch/Elasticsearch domains with a wildcard access policy on a public endpoint |
+| `apigw_lambda` | native | Public Exposure | high | API Gateway (v1/v2) + Lambda anonymous reach: no-auth methods/routes/function URLs, `*` resource policy, wildcard-ARN bypass analyzer |
+| `ecr_repo_policy` | native | Public Exposure | high | Private ECR repos whose repository policy grants `*`/external accounts (images pullable by anyone) |
+| `kms_key_exposure` | native | Public Exposure | high | Customer-managed KMS keys whose key policy grants `*`/external accounts |
+| `public_amis` | native | Public Exposure | high | AMIs shared publicly (`--executable-users all`) |
+| `public_snapshots` | native | Public Exposure | high | Public EBS snapshots + manual RDS DB/cluster snapshots shared with `all` |
+| `public_redshift` | native | Public Exposure | high | Redshift clusters `PubliclyAccessible` (TCP-probed) |
+| `public_documentdb` | native | Public Exposure | high | DocumentDB instances `PubliclyAccessible` (TCP-probed) |
+| `public_neptune` | native | Public Exposure | high | Neptune instances `PubliclyAccessible` (TCP-probed) |
+| `public_mq` | native | Public Exposure | high | Amazon MQ brokers `PubliclyAccessible` |
+| `public_msk` | native | Public Exposure | high | MSK/Kafka provisioned clusters with broker public access enabled |
+| `subdomain_takeover` | native | Public Exposure | high | Dangling Route53 records pointing at unclaimed resources (fingerprint-based) |
+| `public_ecr` | native | Public Exposure | medium | ECR Public gallery repositories (public by design) |
+| `public_sns` | native | Public Exposure | medium | SNS topics with an anonymous (`*`) access policy |
+| `public_sqs` | native | Public Exposure | medium | SQS queues with an anonymous (`*`) access policy |
+| `iam_integrations` | native | IAM & Access | critical | SAML/OIDC providers + role trust policies: GitHub/GitLab/EKS OIDC `:sub` analysis, cross-account confused-deputy, Cognito identity pools, wildcard principals |
+| `bluecloudpeass` | external | IAM & Access | critical | Blue-AWSPEAS privilege-escalation path enumeration (raw JSON output) |
+| `cognito` | native | IAM & Access | high | Cognito user-pool misconfig (self-signup, risky Lambda triggers, weak policies) |
+| `pacu_cognito` | external | IAM & Access | high | Pacu Cognito attack/enum module (raw output) |
+| `secrets_scan` | native | Secrets Management | critical | Kingfisher secret sweep across ~20 sources (S3, Lambda code, CloudFormation, CloudWatch Logs, Glue, …) |
+| `lambda_env` | native | Secrets Management | high | Secrets in Lambda environment variables |
+| `ec2_userdata` | native | Secrets Management | high | Secrets in EC2 instance user data |
+| `codebuild_env` | native | Secrets Management | high | Plaintext secrets in CodeBuild project environment variables |
+| `ecs_ecr_taskdefs` | native | Secrets Management | high | ECS task definitions — env vars/commands (and image refs) flagged for secrets |
+| `ssm_commands` | native | Secrets Management | medium | Secrets in SSM Run Command output history |
+
 ### A full engagement, end to end
 
 ```bash
