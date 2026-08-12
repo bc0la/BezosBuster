@@ -199,6 +199,20 @@ Hitting the cap is logged at `warn` (so it lands in `--error-log`): coverage of
 that bucket was partial. Raise the cap or target the bucket separately if needed.
 See also `--secrets-timeout` (per-collector minutes) and `--no-secrets`.
 
+By default the sweep is a flat, key-ordered listing, so a large early-sorting
+prefix (e.g. `archive/`) can spend the whole page budget before later folders
+(`config/`, `secrets/`) are reached. `--s3-fair` instead walks the bucket
+**breadth-first per folder** so every prefix is touched:
+
+```bash
+bezosbuster scan --profile dev --s3-fair                    # breadth over depth
+bezosbuster scan --profile dev --s3-fair --s3-max-pages 0   # touch every folder, no cap
+```
+
+`--s3-fair` fully lists each folder's immediate level (enqueuing all sub-folders)
+before descending, with `--s3-max-pages` bounding total list pages. To *guarantee*
+every folder in a large bucket is reached, pair it with `--s3-max-pages 0`.
+
 **Secret values are stored unredacted by default** — the full match is written
 to the engagement DB and shown in the report UI (`detail.match`), so you can use
 a found credential straight away. This means `engagement.db` contains live

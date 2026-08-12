@@ -61,6 +61,12 @@ func s3MaxPages(ctx context.Context) int {
 	return defaultS3MaxPages
 }
 
+// s3Fair reports whether the S3 sweep should do a breadth-first per-prefix walk
+// (every folder touched) instead of a flat key-ordered listing.
+func s3Fair(ctx context.Context) bool {
+	return ctx.Value("bb.s3_fair") != nil
+}
+
 // scannable extensions for Lambda code zip extraction.
 var scannableExts = map[string]bool{
 	".py": true, ".js": true, ".ts": true, ".go": true, ".java": true,
@@ -574,78 +580,126 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 
 		fileMap := map[string]*sample{}
 		fileIdx := 0
-
-		// Paginate objects (capped), download scannable ones. A hard page cap
-		// stops the collector from grinding forever on buckets with millions of
-		// objects; hitting it is logged loudly so it's clear coverage was partial.
 		maxPages := s3MaxPages(ctx)
-		paginator := s3.NewListObjectsV2Paginator(regionCli, &s3.ListObjectsV2Input{Bucket: aws.String(bName)})
-		pageNum := 0
-		for paginator.HasMorePages() {
-			if maxPages > 0 && pageNum >= maxPages {
-				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-					fmt.Sprintf("S3: %s reached the %d-page cap (~%d objects scanned) — stopping pagination; raise or disable with --s3-max-pages",
-						bName, maxPages, maxPages*1000))
-				break
+
+		// stage vets one object (size / extension / binary-content gates),
+		// downloads it, and writes it to the temp dir for kingfisher. Shared by
+		// both traversal modes below.
+		stage := func(key string, size int64) {
+			if size == 0 || size > maxS3FileSize {
+				return
 			}
-			page, err := paginator.NextPage(ctx)
+			if isBinaryExt(key) {
+				return
+			}
+			get, err := regionCli.GetObject(ctx, &s3.GetObjectInput{
+				Bucket: aws.String(bName), Key: aws.String(key),
+			})
 			if err != nil {
-				break
+				return
 			}
-			pageNum++
-			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-				fmt.Sprintf("S3: %s page %d (%d objects, %d kept so far)", bName, pageNum, len(page.Contents), fileIdx))
-			for oi, obj := range page.Contents {
-				if oi%50 == 0 {
+			body, err := io.ReadAll(io.LimitReader(get.Body, maxS3FileSize))
+			get.Body.Close()
+			if err != nil || len(body) == 0 {
+				return
+			}
+			if isBinaryContent(body) {
+				return
+			}
+			safe := strings.ReplaceAll(key, "/", "__")
+			safe = strings.ReplaceAll(safe, ":", "_")
+			fname := fmt.Sprintf("%04d_%s", fileIdx, safe)
+			if len(fname) > 200 {
+				fname = fmt.Sprintf("%04d_%s", fileIdx, safe[:190])
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, fname), body, 0600); err != nil {
+				return
+			}
+			fileMap[fname] = &sample{
+				Source: "s3/" + bName + "/" + key, Region: bucketRegion,
+				Metadata: map[string]string{
+					"arn":    fmt.Sprintf("arn:aws:s3:::%s/%s", bName, key),
+					"bucket": bName, "key": key,
+				},
+			}
+			fileIdx++
+		}
+
+		if s3Fair(ctx) {
+			// Fair mode: breadth-first walk over "/"-delimited prefixes so every
+			// folder is visited before the page budget runs out — instead of a
+			// flat listing that can spend the whole budget inside one big prefix.
+			// Each folder's immediate level is fully listed (so all sub-folders
+			// enqueue); pages count against --s3-max-pages globally. Use
+			// --s3-max-pages 0 to guarantee every folder in a huge bucket is hit.
+			queue := []string{""}
+			pageNum, folders := 0, 0
+			capHit := false
+			for len(queue) > 0 && !capHit {
+				prefix := queue[0]
+				queue = queue[1:]
+				folders++
+				var token *string
+				for {
+					if maxPages > 0 && pageNum >= maxPages {
+						capHit = true
+						break
+					}
+					out, err := regionCli.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+						Bucket: aws.String(bName), Prefix: aws.String(prefix),
+						Delimiter: aws.String("/"), ContinuationToken: token,
+					})
+					if err != nil {
+						break
+					}
+					pageNum++
+					for _, obj := range out.Contents {
+						stage(aws.ToString(obj.Key), aws.ToInt64(obj.Size))
+					}
+					for _, cp := range out.CommonPrefixes {
+						queue = append(queue, aws.ToString(cp.Prefix))
+					}
+					if aws.ToBool(out.IsTruncated) {
+						token = out.NextContinuationToken
+						continue
+					}
+					break
+				}
+				if folders%25 == 0 {
 					_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-						fmt.Sprintf("S3: %s page %d obj %d/%d (%d kept)", bName, pageNum, oi+1, len(page.Contents), fileIdx))
+						fmt.Sprintf("S3: %s fair-walk: %d folders visited, %d files kept, %d folders queued",
+							bName, folders, fileIdx, len(queue)))
 				}
-				size := aws.ToInt64(obj.Size)
-				if size == 0 || size > maxS3FileSize {
-					continue
+			}
+			if capHit {
+				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
+					fmt.Sprintf("S3: %s hit the %d-page cap during fair-walk — %d folders visited, %d still queued; raise or disable with --s3-max-pages 0",
+						bName, maxPages, folders, len(queue)))
+			}
+		} else {
+			// Flat mode (default): one recursive listing in key order, capped by
+			// --s3-max-pages. Fast, but a large early-sorting prefix can exhaust
+			// the budget before later folders are reached — use --s3-fair for
+			// breadth. A hard cap stops runaway pagination on huge buckets.
+			paginator := s3.NewListObjectsV2Paginator(regionCli, &s3.ListObjectsV2Input{Bucket: aws.String(bName)})
+			pageNum := 0
+			for paginator.HasMorePages() {
+				if maxPages > 0 && pageNum >= maxPages {
+					_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
+						fmt.Sprintf("S3: %s reached the %d-page cap (~%d objects scanned) — stopping; raise/disable with --s3-max-pages or spread coverage with --s3-fair",
+							bName, maxPages, maxPages*1000))
+					break
 				}
-				key := aws.ToString(obj.Key)
-				// Skip binary-looking extensions.
-				if isBinaryExt(key) {
-					continue
-				}
-
-				get, err := regionCli.GetObject(ctx, &s3.GetObjectInput{
-					Bucket: aws.String(bName), Key: aws.String(key),
-				})
+				page, err := paginator.NextPage(ctx)
 				if err != nil {
-					continue
+					break
 				}
-				body, err := io.ReadAll(io.LimitReader(get.Body, maxS3FileSize))
-				get.Body.Close()
-				if err != nil || len(body) == 0 {
-					continue
+				pageNum++
+				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+					fmt.Sprintf("S3: %s page %d (%d objects, %d kept so far)", bName, pageNum, len(page.Contents), fileIdx))
+				for _, obj := range page.Contents {
+					stage(aws.ToString(obj.Key), aws.ToInt64(obj.Size))
 				}
-				// Skip binary content.
-				if isBinaryContent(body) {
-					continue
-				}
-
-				safe := strings.ReplaceAll(key, "/", "__")
-				safe = strings.ReplaceAll(safe, ":", "_")
-				fname := fmt.Sprintf("%04d_%s", fileIdx, safe)
-				if len(fname) > 200 {
-					fname = fmt.Sprintf("%04d_%s", fileIdx, safe[:190])
-				}
-				fpath := filepath.Join(tmpDir, fname)
-				if err := os.WriteFile(fpath, body, 0600); err != nil {
-					continue
-				}
-				s := &sample{
-					Source: "s3/" + bName + "/" + key, Region: bucketRegion,
-					Content: "", // not needed, file on disk
-					Metadata: map[string]string{
-						"arn": fmt.Sprintf("arn:aws:s3:::%s/%s", bName, key),
-						"bucket": bName, "key": key,
-					},
-				}
-				fileMap[fname] = s
-				fileIdx++
 			}
 		}
 
