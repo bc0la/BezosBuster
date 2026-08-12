@@ -105,8 +105,57 @@ type kfValidation struct {
 	Status string `json:"status"`
 }
 
+// kfReport is one document of kingfisher's --format json output. Findings is a
+// RawMessage rather than []kfFinding because kingfisher emits the findings
+// report ({"findings":[...]}) AND a trailing run summary that reuses the key as
+// a count ({"findings":<number>,...}); decoding straight into a slice trips on
+// the number. parseKingfisherJSON inspects the raw value and only harvests the
+// array form.
 type kfReport struct {
-	Findings []kfFinding `json:"findings"`
+	Findings json.RawMessage `json:"findings"`
+}
+
+// parseKingfisherJSON extracts findings from kingfisher's (possibly multi-
+// document) JSON output. It streams every document but only harvests the one
+// whose "findings" is a JSON array; the summary document (a number) is skipped
+// rather than logged as a decode error. Hard decode failures are returned as
+// warning strings so the caller can surface them without aborting the scan.
+func parseKingfisherJSON(out []byte) (all []kfFinding, warnings []string) {
+	dec := json.NewDecoder(bytes.NewReader(out))
+	docIdx := 0
+	for dec.More() {
+		var report kfReport
+		if err := dec.Decode(&report); err != nil {
+			// Log head of what was left so we can see what kingfisher really outputs.
+			off := int(dec.InputOffset())
+			snippet := ""
+			if off < len(out) {
+				end := off + 200
+				if end > len(out) {
+					end = len(out)
+				}
+				snippet = string(out[off:end])
+			}
+			warnings = append(warnings, fmt.Sprintf(
+				"kingfisher JSON decode error at doc %d offset %d: %s — next bytes: %q",
+				docIdx, off, err.Error(), snippet))
+			break
+		}
+		docIdx++
+		raw := bytes.TrimSpace(report.Findings)
+		if len(raw) == 0 || raw[0] != '[' {
+			// Summary document (findings is a count) or a doc without findings.
+			continue
+		}
+		var fs []kfFinding
+		if err := json.Unmarshal(raw, &fs); err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"kingfisher: could not parse findings array in doc %d: %s", docIdx-1, err.Error()))
+			continue
+		}
+		all = append(all, fs...)
+	}
+	return all, warnings
 }
 
 func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink) error {
@@ -307,34 +356,15 @@ func runKingfisher(ctx context.Context, kfPath, dir, phase string, t creds.Accou
 		saveRawOutput(phase, out, t, sink)
 	}
 
-	// Kingfisher may emit multiple JSON documents (e.g., progress banner
-	// plus the envelope). Use a streaming decoder to consume them all.
-	var all []kfFinding
-	dec := json.NewDecoder(bytes.NewReader(out))
-	docIdx := 0
-	for dec.More() {
-		var report kfReport
-		if err := dec.Decode(&report); err != nil {
-			// Log head of what was left so we can see what kingfisher really outputs.
-			off := int(dec.InputOffset())
-			snippet := ""
-			if off < len(out) {
-				end := off + 200
-				if end > len(out) {
-					end = len(out)
-				}
-				snippet = string(out[off:end])
-			}
-			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
-				fmt.Sprintf("kingfisher JSON decode error at doc %d offset %d: %s — next bytes: %q",
-					docIdx, off, err.Error(), snippet))
-			break
-		}
-		all = append(all, report.Findings...)
-		docIdx++
+	// Kingfisher emits multiple JSON documents (the findings report plus a run
+	// summary that reuses the "findings" key as a count). parseKingfisherJSON
+	// harvests only the array form and reports any real decode failures.
+	all, warnings := parseKingfisherJSON(out)
+	for _, w := range warnings {
+		_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn", w)
 	}
 	_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
-		fmt.Sprintf("kingfisher found %d findings across %d JSON doc(s), %d total bytes", len(all), docIdx, len(out)))
+		fmt.Sprintf("kingfisher found %d findings, %d total bytes", len(all), len(out)))
 	return all
 }
 
