@@ -580,12 +580,19 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 
 		fileMap := map[string]*sample{}
 		fileIdx := 0
+		examined := 0
 		maxPages := s3MaxPages(ctx)
 
 		// stage vets one object (size / extension / binary-content gates),
 		// downloads it, and writes it to the temp dir for kingfisher. Shared by
-		// both traversal modes below.
+		// both traversal modes below. Emits a cumulative examined/kept heartbeat
+		// every 250 objects so long download runs still show movement.
 		stage := func(key string, size int64) {
+			examined++
+			if examined%250 == 0 {
+				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
+					fmt.Sprintf("S3: %s: examined %d objects, %d kept", bName, examined, fileIdx))
+			}
 			if size == 0 || size > maxS3FileSize {
 				return
 			}
