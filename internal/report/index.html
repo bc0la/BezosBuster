@@ -147,6 +147,42 @@ function checkKey(f) {
   return d.category || d.kind || d.check || d.subtype || f.module;
 }
 
+// checkLabel prettifies a check key for display without changing the key itself
+// (the raw key is what excludedChecks / exports match on). The secrets_scan
+// module tags its hits "kf:<sourcetype>" — render those as readable, clearly
+// kingfisher-sourced names so they stand apart from the native secrets modules.
+const CHECK_LABELS = {
+  'kf:ec2_userdata':    'EC2 user data (kingfisher)',
+  'kf:lambda_env':      'Lambda env vars (kingfisher)',
+  'kf:lambda_code':     'Lambda code (kingfisher)',
+  'kf:ecs_taskdef':     'ECS task defs (kingfisher)',
+  'kf:codebuild':       'CodeBuild env (kingfisher)',
+  'kf:ssm_param':       'SSM Parameter Store (kingfisher)',
+  'kf:ssm_output':      'SSM command output (kingfisher)',
+  'kf:cfn_params':      'CloudFormation params (kingfisher)',
+  'kf:cfn_template':    'CloudFormation template (kingfisher)',
+  'kf:apigw_vars':      'API Gateway stage vars (kingfisher)',
+  'kf:s3':              'S3 objects (kingfisher)',
+  'kf:stepfn':          'Step Functions (kingfisher)',
+  'kf:cwlogs':          'CloudWatch Logs (kingfisher)',
+  'kf:iam_keys':        'IAM access keys (kingfisher)',
+  'kf:glue_job':        'Glue jobs (kingfisher)',
+  'kf:glue_conn':       'Glue connections (kingfisher)',
+  'kf:codepipeline':    'CodePipeline (kingfisher)',
+  'kf:beanstalk':       'Elastic Beanstalk (kingfisher)',
+  'kf:appsync':         'AppSync (kingfisher)',
+  'kf:apprunner':       'App Runner (kingfisher)',
+  'kf:redshift_params': 'Redshift params (kingfisher)',
+  'kf:sagemaker_lc':    'SageMaker lifecycle (kingfisher)',
+  'kf:emr':             'EMR (kingfisher)',
+  'kf:amplify':         'Amplify (kingfisher)',
+};
+function checkLabel(k) {
+  if (CHECK_LABELS[k]) return CHECK_LABELS[k];
+  if (k && k.indexOf('kf:') === 0) return k.slice(3).replace(/_/g, ' ') + ' (kingfisher)';
+  return k;
+}
+
 // ---- False positives (client-side, per analyst) --------------------------
 // Stored in localStorage keyed by finding ID. "Hiding" a finding moves it into
 // the False Positives section rather than deleting it, so accidental removals
@@ -282,8 +318,8 @@ function renderCheckFilter() {
   for (const k of keys) {
     const b = document.createElement('button');
     if (excludedChecks.has(k)) b.classList.add('off');
-    b.innerHTML = ratingDot(maxRating([...checkMods[k]])) + k + '<span class="count">' + counts[k] + '</span>';
-    b.title = excludedChecks.has(k) ? 'Click to show' : 'Click to hide';
+    b.innerHTML = ratingDot(maxRating([...checkMods[k]])) + checkLabel(k) + '<span class="count">' + counts[k] + '</span>';
+    b.title = (excludedChecks.has(k) ? 'Click to show' : 'Click to hide') + ' — ' + k;
     b.onclick = () => {
       if (excludedChecks.has(k)) excludedChecks.delete(k); else excludedChecks.add(k);
       renderAll();

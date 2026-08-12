@@ -100,6 +100,8 @@ func runCmd(use, short, kind string) *cobra.Command {
 		noSecrets          bool
 		noS3               bool
 		secretsTimeoutMins int
+		logFile            string
+		errorLog           string
 		dockerForce        bool
 		dockerImage        string
 		dockerPull         bool
@@ -127,6 +129,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 						region: region, outDir: outDir, engDir: engDir,
 						moduleList: moduleList, excludeList: excludeList, noTUI: noTUI, noSecrets: noSecrets,
 						noS3: noS3, secretsTimeoutMins: secretsTimeoutMins,
+						logFile: logFile, errorLog: errorLog,
 					})
 					if err != nil {
 						return err
@@ -200,6 +203,18 @@ func runCmd(use, short, kind string) *cobra.Command {
 				return err
 			}
 			defer eng.Close()
+			// Optional plaintext log files. "auto" drops them inside the
+			// engagement dir (which is Docker-mounted, so it survives the
+			// collect-in-container path); any other value is used verbatim.
+			resolveLog := func(v, name string) string {
+				if v == "auto" {
+					return filepath.Join(finalDir, name)
+				}
+				return v
+			}
+			if err := eng.SetLogFiles(resolveLog(logFile, "run.log"), resolveLog(errorLog, "errors.log")); err != nil {
+				return err
+			}
 			_ = eng.SetMeta(ctx, "started_at", time.Now().UTC().Format(time.RFC3339))
 			_ = eng.SetMeta(ctx, "targets", strings.Join(targetIDs(targets), ","))
 			_ = eng.SetMeta(ctx, "opt.profile", profile)
@@ -239,6 +254,8 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().BoolVar(&noSecrets, "no-secrets", false, "Skip the secrets_scan module (faster runs)")
 	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
 	c.Flags().IntVar(&secretsTimeoutMins, "secrets-timeout", 0, "Per-collector timeout in minutes for secrets_scan (0 = disabled). Partial results are kept.")
+	c.Flags().StringVar(&logFile, "log-file", "", "Also write every log event to this plaintext file (easier to tail/grep than the UI log tab). Value 'auto' → <engagement>/run.log.")
+	c.Flags().StringVar(&errorLog, "error-log", "", "Also write only warning/error log events to this file. Value 'auto' → <engagement>/errors.log.")
 	if kind == "external" {
 		c.Flags().BoolVar(&dockerForce, "docker", false, "Run inside the bezosbuster Docker image (auto: used when the external tools aren't installed locally). --docker forces it; --docker=false disables. Auto-mounts ~/.aws and the engagements dir.")
 		c.Flags().StringVar(&dockerImage, "docker-image", DefaultDockerImage, "Image to use when delegating to Docker")
@@ -266,6 +283,8 @@ type collectFlags struct {
 	noSecrets          bool
 	noS3               bool
 	secretsTimeoutMins int
+	logFile            string
+	errorLog           string
 }
 
 // containerArgs rebuilds the subcommand + flags to run inside the image, and
@@ -315,6 +334,21 @@ func containerArgs(sub string, f collectFlags) ([]string, string, error) {
 	}
 	if f.secretsTimeoutMins > 0 {
 		a = append(a, "--secrets-timeout", strconv.Itoa(f.secretsTimeoutMins))
+	}
+	// Log-file paths pass straight through; "auto" resolves inside the
+	// container to the (mounted) engagement dir, so it works cross-host. A
+	// bespoke host path would write only inside the container, so warn.
+	if f.logFile != "" {
+		if f.logFile != "auto" {
+			fmt.Fprintln(os.Stderr, "warning: --log-file with a Docker collect run writes inside the container; use --log-file auto to land it in the engagement dir")
+		}
+		a = append(a, "--log-file", f.logFile)
+	}
+	if f.errorLog != "" {
+		if f.errorLog != "auto" {
+			fmt.Fprintln(os.Stderr, "warning: --error-log with a Docker collect run writes inside the container; use --error-log auto to land it in the engagement dir")
+		}
+		a = append(a, "--error-log", f.errorLog)
 	}
 
 	var hostDir string

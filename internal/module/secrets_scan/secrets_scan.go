@@ -362,14 +362,25 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.Ac
 		title := fmt.Sprintf("[%s] %s in %s", f.Rule.ID, f.Rule.Name, s.Source)
 		redacted := redactMatch(f.Finding.Snippet)
 
+		// The sample Source is "<sourcetype>/<resource>" (e.g. "ssm_param/Name",
+		// "s3/bucket/key"). Expose the leading source-type as a filterable check
+		// facet, namespaced "kf:" so the report UI keeps kingfisher hits visually
+		// distinct from the native secrets modules (lambda_env, ssm_commands, …).
+		sourceType := s.Source
+		if i := strings.IndexByte(sourceType, '/'); i >= 0 {
+			sourceType = sourceType[:i]
+		}
+
 		detail := map[string]any{
-			"rule_id":    f.Rule.ID,
-			"rule_name":  f.Rule.Name,
-			"match":      redacted,
-			"source":     s.Source,
-			"line":       f.Finding.Line,
-			"confidence": f.Finding.Confidence,
-			"validation": f.Finding.Validation.Status,
+			"rule_id":     f.Rule.ID,
+			"rule_name":   f.Rule.Name,
+			"match":       redacted,
+			"source":      s.Source,
+			"source_type": sourceType,
+			"check":       "kf:" + sourceType,
+			"line":        f.Finding.Line,
+			"confidence":  f.Finding.Confidence,
+			"validation":  f.Finding.Validation.Status,
 		}
 		for k, v := range s.Metadata {
 			detail[k] = v

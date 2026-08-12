@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,6 +79,82 @@ type Engagement struct {
 	// OnLog is called for every LogEvent if non-nil. Used by the TUI
 	// to show live sub-module progress.
 	OnLog func(module, accountID, level, msg string)
+
+	// Plaintext log sinks configured via SetLogFiles. logAll receives every
+	// event; logErr receives only warn/error/fatal events. Either may be nil.
+	// logMu serialises writes so concurrent module goroutines never interleave
+	// partial lines. logClosers holds the underlying files to close on Close().
+	logMu      sync.Mutex
+	logAll     io.Writer
+	logErr     io.Writer
+	logClosers []io.Closer
+}
+
+// SetLogFiles opens optional plaintext log files that mirror LogEvent output,
+// independent of the TUI's in-memory OnLog hook. allPath (if non-empty)
+// receives every log line; errPath (if non-empty) receives only warn/error
+// lines, so a run's failures land in one small, greppable file. Both are opened
+// for append (so --engagement re-runs accumulate) and created if missing.
+func (e *Engagement) SetLogFiles(allPath, errPath string) error {
+	open := func(p string) (*os.File, error) {
+		if p == "" {
+			return nil, nil
+		}
+		if d := filepath.Dir(p); d != "" && d != "." {
+			_ = os.MkdirAll(d, 0o755)
+		}
+		return os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	}
+	f, err := open(allPath)
+	if err != nil {
+		return fmt.Errorf("open log file %s: %w", allPath, err)
+	}
+	if f != nil {
+		e.logAll = f
+		e.logClosers = append(e.logClosers, f)
+	}
+	g, err := open(errPath)
+	if err != nil {
+		return fmt.Errorf("open error-log file %s: %w", errPath, err)
+	}
+	if g != nil {
+		e.logErr = g
+		e.logClosers = append(e.logClosers, g)
+	}
+	return nil
+}
+
+// isErrLevel reports whether a log level should land in the errors-only file.
+// Module failures across the codebase are logged at "warn", so warn is included.
+func isErrLevel(level string) bool {
+	switch strings.ToLower(level) {
+	case "warn", "warning", "error", "err", "fatal":
+		return true
+	}
+	return false
+}
+
+func (e *Engagement) writeLogLine(module, accountID, level, msg string) {
+	if e.logAll == nil && e.logErr == nil {
+		return
+	}
+	orDash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+	line := fmt.Sprintf("%s [%-5s] %s %s: %s\n",
+		time.Now().UTC().Format(time.RFC3339),
+		strings.ToUpper(level), orDash(module), orDash(accountID), msg)
+	e.logMu.Lock()
+	defer e.logMu.Unlock()
+	if e.logAll != nil {
+		_, _ = io.WriteString(e.logAll, line)
+	}
+	if e.logErr != nil && isErrLevel(level) {
+		_, _ = io.WriteString(e.logErr, line)
+	}
 }
 
 // Open opens an engagement at the given directory. The directory is created
@@ -98,7 +176,12 @@ func Open(dir string) (*Engagement, error) {
 	return &Engagement{db: db, Dir: dir}, nil
 }
 
-func (e *Engagement) Close() error { return e.db.Close() }
+func (e *Engagement) Close() error {
+	for _, c := range e.logClosers {
+		_ = c.Close()
+	}
+	return e.db.Close()
+}
 
 func (e *Engagement) DB() *sql.DB { return e.db }
 
@@ -220,6 +303,7 @@ func (e *Engagement) LogEvent(ctx context.Context, module, accountID, level, msg
 	if e.OnLog != nil {
 		e.OnLog(module, accountID, level, msg)
 	}
+	e.writeLogLine(module, accountID, level, msg)
 	_, err := e.db.ExecContext(ctx,
 		`INSERT INTO logs(account_id, module, level, msg, created_at) VALUES(?,?,?,?,?)`,
 		nullIfEmpty(accountID), nullIfEmpty(module), level, msg, time.Now().UTC())

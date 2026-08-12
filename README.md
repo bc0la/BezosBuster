@@ -184,6 +184,34 @@ bezosbuster scan --profile hub \
 against the registry (unknown names are ignored), and are recorded in the
 engagement's `meta` so `resume` reproduces the same selection.
 
+### Log files
+
+The TUI (and the report's Logs tab) show live progress, but they're awkward to
+scroll back through. Both `scan` and `collect` can additionally mirror every log
+event to a plaintext file you can `tail -f` / `grep`:
+
+```bash
+# Full log + an errors-only file, dropped inside the engagement dir.
+bezosbuster scan --profile dev --log-file auto --error-log auto
+#   → engagements/<run>/run.log        (everything)
+#   → engagements/<run>/errors.log     (warnings/errors only — quick triage)
+
+# Or point them anywhere:
+bezosbuster scan --profile dev --log-file /tmp/bb.log --error-log /tmp/bb-err.log
+
+tail -f engagements/<run>/run.log
+```
+
+- `--log-file PATH` — every event. `--error-log PATH` — only warn/error/fatal
+  (module failures like `AccessDenied` are logged at `warn`, so they land here).
+- Either can be used alone; both are optional and off by default.
+- Lines look like `2026-08-12T20:08:42Z [WARN ] public_rds 1111…: us-east-1: AccessDenied`.
+- Files are opened for **append**, so `--engagement` re-runs accumulate history.
+- `auto` resolves to `<engagement>/run.log` / `errors.log` — and because the
+  engagement dir is the mount used by the Docker `collect` path, `auto` is the
+  value that works when `collect` delegates into the container (a bespoke host
+  path would only be written inside the container).
+
 #### All modules
 
 Names below are exactly what you pass to `--modules` / `--exclude`. **Kind**:
