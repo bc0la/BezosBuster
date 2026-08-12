@@ -199,6 +199,16 @@ Hitting the cap is logged at `warn` (so it lands in `--error-log`): coverage of
 that bucket was partial. Raise the cap or target the bucket separately if needed.
 See also `--secrets-timeout` (per-collector minutes) and `--no-secrets`.
 
+**Secret values are stored unredacted by default** — the full match is written
+to the engagement DB and shown in the report UI (`detail.match`), so you can use
+a found credential straight away. This means `engagement.db` contains live
+secrets in plaintext; treat the engagement dir as sensitive. To keep only a
+short preview (`AKIA12…3456`) instead:
+
+```bash
+bezosbuster scan --profile dev --redact-secrets
+```
+
 ### Log files
 
 The TUI (and the report's Logs tab) show live progress, but they're awkward to

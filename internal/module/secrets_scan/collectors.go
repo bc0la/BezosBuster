@@ -653,7 +653,7 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 			_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "info",
 				fmt.Sprintf("S3: scanning %d files from %s with kingfisher", fileIdx, bName))
 			kfFindings := runKingfisher(ctx, kfPath, tmpDir, "s3_"+bName, t, sink)
-			emitFindings(kfFindings, fileMap, t, sink)
+			emitFindings(kfFindings, fileMap, t, sink, ctx.Value("bb.redact_secrets") == nil)
 		}
 
 		// Clean up this bucket's temp files.

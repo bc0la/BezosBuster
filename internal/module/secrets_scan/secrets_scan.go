@@ -290,7 +290,7 @@ func scanSamples(ctx context.Context, kfPath string, samples []sample, t creds.A
 	}
 
 	kfFindings := runKingfisher(ctx, kfPath, tmpDir, "non_s3", t, sink)
-	emitFindings(kfFindings, fileMap, t, sink)
+	emitFindings(kfFindings, fileMap, t, sink, ctx.Value("bb.redact_secrets") == nil)
 }
 
 // saveRawOutput writes kingfisher's raw output to
@@ -368,7 +368,11 @@ func runKingfisher(ctx context.Context, kfPath, dir, phase string, t creds.Accou
 	return all
 }
 
-func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink) {
+// emitFindings writes one report finding per kingfisher hit. unredact defaults
+// to true: the full secret value is stored so it's usable straight from the
+// report UI. Pass --redact-secrets to keep only a short redacted preview
+// (match = first/last few chars) in the engagement DB instead.
+func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink, unredact bool) {
 	ctx := context.Background()
 	for _, f := range kfFindings {
 		fname := filepath.Base(f.Finding.Path)
@@ -390,7 +394,10 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.Ac
 		}
 
 		title := fmt.Sprintf("[%s] %s in %s", f.Rule.ID, f.Rule.Name, s.Source)
-		redacted := redactMatch(f.Finding.Snippet)
+		match := redactMatch(f.Finding.Snippet)
+		if unredact {
+			match = f.Finding.Snippet
+		}
 
 		// The sample Source is "<sourcetype>/<resource>" (e.g. "ssm_param/Name",
 		// "s3/bucket/key"). Expose the leading source-type as a filterable check
@@ -404,7 +411,7 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.Ac
 		detail := map[string]any{
 			"rule_id":     f.Rule.ID,
 			"rule_name":   f.Rule.Name,
-			"match":       redacted,
+			"match":       match,
 			"source":      s.Source,
 			"source_type": sourceType,
 			"check":       "kf:" + sourceType,

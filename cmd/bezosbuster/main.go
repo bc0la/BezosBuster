@@ -151,6 +151,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 		noS3               bool
 		secretsTimeoutMins int
 		s3MaxPages         int
+		redactSecrets      bool
 		logFile            string
 		errorLog           string
 		dockerForce        bool
@@ -287,6 +288,9 @@ func runCmd(use, short, kind string) *cobra.Command {
 				ctx = context.WithValue(ctx, "bb.secrets_collector_timeout_mins", secretsTimeoutMins)
 			}
 			ctx = context.WithValue(ctx, "bb.s3_max_pages", s3MaxPages)
+			if redactSecrets {
+				ctx = context.WithValue(ctx, "bb.redact_secrets", true)
+			}
 			return runEngagement(ctx, eng, targets, modules, nil, noTUI)
 		},
 	}
@@ -307,6 +311,7 @@ func runCmd(use, short, kind string) *cobra.Command {
 	c.Flags().BoolVar(&noS3, "no-s3", false, "Skip S3 scanning in secrets_scan (faster runs)")
 	c.Flags().IntVar(&secretsTimeoutMins, "secrets-timeout", 0, "Per-collector timeout in minutes for secrets_scan (0 = disabled). Partial results are kept.")
 	c.Flags().IntVar(&s3MaxPages, "s3-max-pages", 25, "Max ListObjectsV2 pages per bucket in secrets_scan's S3 sweep (~1000 objects/page; 0 = unlimited). Stops runaway pagination on huge buckets.")
+	c.Flags().BoolVar(&redactSecrets, "redact-secrets", false, "Store only a redacted preview of secrets_scan matches (default: full unredacted value is kept in the engagement DB and report UI).")
 	c.Flags().StringVar(&logFile, "log-file", "", "Also write every log event to this plaintext file (easier to tail/grep than the UI log tab). Value 'auto' → <engagement>/run.log.")
 	c.Flags().StringVar(&errorLog, "error-log", "", "Also write only warning/error log events to this file. Value 'auto' → <engagement>/errors.log.")
 	if kind == "external" {
