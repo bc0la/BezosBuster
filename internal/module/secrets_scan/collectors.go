@@ -46,6 +46,21 @@ import (
 
 const maxS3FileSize = 10 * 1024 * 1024 // 10MB
 
+// defaultS3MaxPages caps ListObjectsV2 pagination per bucket. At the 1000-object
+// default page size that's ~25k objects sampled — enough to catch secrets
+// without paginating for hours on buckets holding millions of objects. Override
+// (or disable, with 0) via the --s3-max-pages flag.
+const defaultS3MaxPages = 25
+
+// s3MaxPages resolves the per-bucket page cap from context, falling back to the
+// default. 0 means unlimited.
+func s3MaxPages(ctx context.Context) int {
+	if v, ok := ctx.Value("bb.s3_max_pages").(int); ok {
+		return v
+	}
+	return defaultS3MaxPages
+}
+
 // scannable extensions for Lambda code zip extraction.
 var scannableExts = map[string]bool{
 	".py": true, ".js": true, ".ts": true, ".go": true, ".java": true,
@@ -560,10 +575,19 @@ func scanS3PerBucket(ctx context.Context, kfPath string, t creds.AccountTarget, 
 		fileMap := map[string]*sample{}
 		fileIdx := 0
 
-		// Paginate all objects, download scannable ones.
+		// Paginate objects (capped), download scannable ones. A hard page cap
+		// stops the collector from grinding forever on buckets with millions of
+		// objects; hitting it is logged loudly so it's clear coverage was partial.
+		maxPages := s3MaxPages(ctx)
 		paginator := s3.NewListObjectsV2Paginator(regionCli, &s3.ListObjectsV2Input{Bucket: aws.String(bName)})
 		pageNum := 0
 		for paginator.HasMorePages() {
+			if maxPages > 0 && pageNum >= maxPages {
+				_ = sink.LogEvent(ctx, "secrets_scan", t.AccountID, "warn",
+					fmt.Sprintf("S3: %s reached the %d-page cap (~%d objects scanned) — stopping pagination; raise or disable with --s3-max-pages",
+						bName, maxPages, maxPages*1000))
+				break
+			}
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
 				break

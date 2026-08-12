@@ -184,6 +184,21 @@ bezosbuster scan --profile hub \
 against the registry (unknown names are ignored), and are recorded in the
 engagement's `meta` so `resume` reproduces the same selection.
 
+### Tuning `secrets_scan`
+
+The S3 sweep samples object contents for secrets. Buckets with millions of
+objects would otherwise paginate for hours, so it's capped:
+
+```bash
+bezosbuster scan --profile dev --s3-max-pages 25   # default: ~25k objects/bucket
+bezosbuster scan --profile dev --s3-max-pages 0    # unlimited (old behavior)
+bezosbuster scan --profile dev --no-s3             # skip S3 entirely
+```
+
+Hitting the cap is logged at `warn` (so it lands in `--error-log`): coverage of
+that bucket was partial. Raise the cap or target the bucket separately if needed.
+See also `--secrets-timeout` (per-collector minutes) and `--no-secrets`.
+
 ### Log files
 
 The TUI (and the report's Logs tab) show live progress, but they're awkward to
