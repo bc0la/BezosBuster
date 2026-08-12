@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,18 +57,67 @@ import (
 	_ "github.com/bc0la/BezosBuster/internal/module/subdomain_takeover"
 )
 
-// Injected at build time via -ldflags (see .goreleaser.yaml).
+// Injected at build time via -ldflags (see .goreleaser.yaml). For release
+// builds these hold the real values; for `go install`/`go build` they keep the
+// defaults below and versionString() fills them in from the embedded build info.
 var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
 )
 
+// versionString renders the --version banner. GoReleaser injects version/commit/
+// date via -ldflags; when it hasn't (a plain `go install ...@v0.3.2` or local
+// `go build`), fall back to the module version and VCS stamps the Go toolchain
+// embeds in every binary, so `--version` still reports the installed tag.
+func versionString() string {
+	v, c, d := version, commit, date
+	if v == "dev" {
+		if bi, ok := debug.ReadBuildInfo(); ok {
+			if bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+				v = bi.Main.Version
+			}
+			for _, s := range bi.Settings {
+				switch s.Key {
+				case "vcs.revision":
+					if c == "none" && s.Value != "" {
+						c = s.Value
+						if len(c) > 12 {
+							c = c[:12]
+						}
+					}
+				case "vcs.time":
+					if d == "unknown" && s.Value != "" {
+						d = s.Value
+					}
+				case "vcs.modified":
+					if s.Value == "true" {
+						c += "-dirty"
+					}
+				}
+			}
+		}
+	}
+	// Only show commit/date when we actually know them. A proxy `go install`
+	// carries the version but no VCS stamps, so it should read just "v0.3.2".
+	var extra []string
+	if c != "none" && c != "" {
+		extra = append(extra, "commit "+c)
+	}
+	if d != "unknown" && d != "" {
+		extra = append(extra, "built "+d)
+	}
+	if len(extra) > 0 {
+		return v + " (" + strings.Join(extra, ", ") + ")"
+	}
+	return v
+}
+
 func main() {
 	root := &cobra.Command{
 		Use:     "bezosbuster",
 		Short:   "Automated AWS whitebox pentest workflow",
-		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
+		Version: versionString(),
 	}
 	root.AddCommand(
 		runCmd("scan", "Run native AWS-SDK checks (fast, in-process)", "native"),
