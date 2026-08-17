@@ -453,6 +453,11 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, tmpDir str
 // the engagement dir: <engagement>/secrets_scan/<account>/hits/<source>, where
 // <source> is the sample Source (e.g. "s3/bucket/key") preserved as a nested
 // path. Returns the destination path, or "" on any failure (best-effort).
+//
+// Sources are not always unique: collectECSTaskDefs emits one sample per
+// task-def revision but keys them all on "ecs_taskdef/<family>". To avoid one
+// revision clobbering another, an identical existing file is reused, otherwise
+// the next free "<name>-N" suffix is chosen.
 func saveHitFile(srcPath, source string, t creds.AccountTarget, sink findings.Sink) string {
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
@@ -466,9 +471,20 @@ func saveHitFile(srcPath, source string, t creds.AccountTarget, sink findings.Si
 	if rel == "" {
 		return ""
 	}
-	dest := filepath.Join(rawDir, "hits", rel)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	base := filepath.Join(rawDir, "hits", rel)
+	if err := os.MkdirAll(filepath.Dir(base), 0o755); err != nil {
 		return ""
+	}
+	dest := base
+	for i := 2; ; i++ {
+		existing, rerr := os.ReadFile(dest)
+		if os.IsNotExist(rerr) {
+			break // free slot
+		}
+		if rerr == nil && bytes.Equal(existing, data) {
+			return dest // exact content already saved (e.g. re-hit of same file)
+		}
+		dest = fmt.Sprintf("%s-%d", base, i) // occupied by different content
 	}
 	if err := os.WriteFile(dest, data, 0o600); err != nil {
 		return ""
