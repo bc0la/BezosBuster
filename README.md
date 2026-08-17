@@ -286,7 +286,7 @@ report-UI grouping; **rating** is the realistic worst-case potential severity.
 | `iam_integrations` | native | IAM & Access | critical | SAML/OIDC providers + role trust policies: GitHub/GitLab/EKS OIDC `:sub` analysis, cross-account confused-deputy, Cognito identity pools, wildcard principals |
 | `bluecloudpeass` | external | IAM & Access | critical | Blue-AWSPEAS privilege-escalation path enumeration (raw JSON output) |
 | `cognito` | native | IAM & Access | high | Cognito user-pool misconfig (self-signup, risky Lambda triggers, weak policies) |
-| `secrets_scan` | native | Secrets Management | critical | Kingfisher secret sweep across ~20 sources (S3, Lambda code, CloudFormation, CloudWatch Logs, Glue, …) |
+| `secrets_scan` | native | Secrets Management | critical | Kingfisher secret sweep across ~25 sources (S3, Lambda code, CloudFormation, CloudWatch Logs, Glue, SSM Parameters/Run Command output/Documents/Automation, …) |
 | `lambda_env` | native | Secrets Management | high | Secrets in Lambda environment variables |
 | `ec2_userdata` | native | Secrets Management | high | Secrets in EC2 instance user data |
 | `codebuild_env` | native | Secrets Management | high | Plaintext secrets in CodeBuild project environment variables |

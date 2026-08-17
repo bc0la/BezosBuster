@@ -53,6 +53,8 @@ func (Module) Requires() []string {
 		"codebuild:ListProjects", "codebuild:BatchGetProjects",
 		"ssm:GetParametersByPath", "ssm:DescribeParameters",
 		"ssm:ListCommands", "ssm:ListCommandInvocations",
+		"ssm:ListDocuments", "ssm:GetDocument",
+		"ssm:DescribeAutomationExecutions", "ssm:GetAutomationExecution",
 		"cloudformation:ListStacks", "cloudformation:GetTemplate",
 		"cloudformation:DescribeStacks",
 		"apigateway:GET",
@@ -185,6 +187,8 @@ func (Module) Run(ctx context.Context, t creds.AccountTarget, sink findings.Sink
 		{"CodeBuild env", collectCodeBuildEnv},
 		{"SSM parameters", collectSSMParams},
 		{"SSM command output", collectSSMCommandOutput},
+		{"SSM documents", collectSSMDocuments},
+		{"SSM automation", collectSSMAutomation},
 		{"CloudFormation", collectCloudFormation},
 		{"API GW stage vars", collectAPIGWStageVars},
 		{"Step Functions", collectStepFunctions},
@@ -541,6 +545,10 @@ func pullCommand(sourceType, region string, meta map[string]string) string {
 		return "aws ssm get-parameter --name '" + meta["name"] + "' --with-decryption" + r
 	case "ssm_output":
 		return "aws ssm list-command-invocations --command-id " + meta["command_id"] + " --details" + r
+	case "ssm_document":
+		return "aws ssm get-document --name " + meta["name"] + r
+	case "ssm_automation":
+		return "aws ssm get-automation-execution --automation-execution-id " + meta["execution_id"] + r
 	case "cfn_params":
 		return "aws cloudformation describe-stacks --stack-name " + meta["stack"] + r
 	case "cfn_template":

@@ -439,6 +439,133 @@ func collectSSMCommandOutput(ctx context.Context, t creds.AccountTarget, regions
 	return out
 }
 
+// --- SSM Documents (customer-owned) ---
+
+// collectSSMDocuments pulls the content of Self-owned SSM documents (Command,
+// Automation, etc.). Custom documents frequently hardcode default parameter
+// values, tokens, or bootstrap credentials in their content.
+func collectSSMDocuments(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := ssm.NewFromConfig(t.Config, func(o *ssm.Options) { o.Region = region })
+		var token *string
+		for {
+			list, err := cli.ListDocuments(ctx, &ssm.ListDocumentsInput{
+				Filters: []ssmtypes.DocumentKeyValuesFilter{
+					{Key: aws.String("Owner"), Values: []string{"Self"}},
+				},
+				NextToken: token,
+			})
+			if err != nil {
+				break
+			}
+			for _, d := range list.DocumentIdentifiers {
+				name := aws.ToString(d.Name)
+				doc, err := cli.GetDocument(ctx, &ssm.GetDocumentInput{Name: aws.String(name)})
+				if err != nil {
+					continue
+				}
+				content := aws.ToString(doc.Content)
+				if content == "" {
+					continue
+				}
+				if len(content) > maxS3FileSize {
+					content = content[:maxS3FileSize]
+				}
+				out = append(out, sample{
+					Source: "ssm_document/" + name, Region: region,
+					Content: content,
+					Metadata: map[string]string{
+						"arn":  fmt.Sprintf("arn:aws:ssm:%s:%s:document/%s", region, t.AccountID, name),
+						"name": name, "type": string(d.DocumentType),
+					},
+				})
+			}
+			if list.NextToken == nil {
+				break
+			}
+			token = list.NextToken
+		}
+	}
+	return out
+}
+
+// --- SSM Automation executions ---
+
+// maxAutomationExecutions caps how many recent Automation executions we pull
+// full detail for, so a long history doesn't stall the collector.
+const maxAutomationExecutions = 250
+
+// collectSSMAutomation pulls parameters, outputs, and per-step inputs/outputs
+// from recent Automation executions — any of which can carry secrets passed to
+// or emitted by the runbook.
+func collectSSMAutomation(ctx context.Context, t creds.AccountTarget, regions []string) []sample {
+	var out []sample
+	for _, region := range regions {
+		cli := ssm.NewFromConfig(t.Config, func(o *ssm.Options) { o.Region = region })
+		var token *string
+		count := 0
+		done := false
+		for !done {
+			list, err := cli.DescribeAutomationExecutions(ctx, &ssm.DescribeAutomationExecutionsInput{NextToken: token})
+			if err != nil {
+				break
+			}
+			for _, m := range list.AutomationExecutionMetadataList {
+				if count >= maxAutomationExecutions {
+					done = true
+					break
+				}
+				count++
+				id := aws.ToString(m.AutomationExecutionId)
+				exec, err := cli.GetAutomationExecution(ctx, &ssm.GetAutomationExecutionInput{
+					AutomationExecutionId: aws.String(id),
+				})
+				if err != nil || exec.AutomationExecution == nil {
+					continue
+				}
+				ae := exec.AutomationExecution
+				var lines []string
+				for k, vs := range ae.Parameters {
+					lines = append(lines, "PARAM "+k+"="+strings.Join(vs, ","))
+				}
+				for k, vs := range ae.Outputs {
+					lines = append(lines, "OUTPUT "+k+"="+strings.Join(vs, ","))
+				}
+				for _, st := range ae.StepExecutions {
+					sn := aws.ToString(st.StepName)
+					for k, v := range st.Inputs {
+						lines = append(lines, "STEP "+sn+" IN "+k+"="+v)
+					}
+					for k, vs := range st.Outputs {
+						lines = append(lines, "STEP "+sn+" OUT "+k+"="+strings.Join(vs, ","))
+					}
+				}
+				if len(lines) == 0 {
+					continue
+				}
+				content := strings.Join(lines, "\n")
+				if len(content) > maxS3FileSize {
+					content = content[:maxS3FileSize]
+				}
+				out = append(out, sample{
+					Source: "ssm_automation/" + id, Region: region,
+					Content: content,
+					Metadata: map[string]string{
+						"execution_id": id,
+						"document":     aws.ToString(m.DocumentName),
+					},
+				})
+			}
+			if done || list.NextToken == nil {
+				break
+			}
+			token = list.NextToken
+		}
+	}
+	return out
+}
+
 // --- CloudFormation ---
 
 func collectCloudFormation(ctx context.Context, t creds.AccountTarget, regions []string) []sample {

@@ -25,6 +25,13 @@ func TestPullCommand(t *testing.T) {
 		t.Errorf("apigw_vars: %q", c)
 	}
 
+	if c := pullCommand("ssm_document", "us-east-1", map[string]string{"name": "My-Doc"}); c != "aws ssm get-document --name My-Doc --region us-east-1" {
+		t.Errorf("ssm_document: %q", c)
+	}
+	if c := pullCommand("ssm_automation", "us-east-1", map[string]string{"execution_id": "abc-123"}); c != "aws ssm get-automation-execution --automation-execution-id abc-123 --region us-east-1" {
+		t.Errorf("ssm_automation: %q", c)
+	}
+
 	// Unknown source type → no command.
 	if c := pullCommand("mystery", "us-east-1", nil); c != "" {
 		t.Errorf("unknown source should give empty command, got %q", c)
