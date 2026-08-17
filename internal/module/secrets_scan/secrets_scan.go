@@ -424,6 +424,12 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, tmpDir str
 			detail[k] = v
 		}
 
+		// Command to re-fetch the raw resource by hand (e.g. the exact task-def
+		// revision by ARN), so the finding is actionable straight from the report.
+		if cmd := pullCommand(sourceType, region, s.Metadata); cmd != "" {
+			detail["pull_command"] = cmd
+		}
+
 		// Persist the file that hit (unless redacting) so the report can link
 		// straight to the offending content. RawOutputPath points at the
 		// containing folder — the report's /raw/ browser appends a trailing
@@ -506,6 +512,79 @@ func sanitizeSourcePath(source string) string {
 		clean = append(clean, repl.Replace(p))
 	}
 	return filepath.Join(clean...)
+}
+
+// afterLast returns the substring after the last occurrence of sep (or s whole).
+func afterLast(s, sep string) string {
+	if i := strings.LastIndex(s, sep); i >= 0 {
+		return s[i+len(sep):]
+	}
+	return s
+}
+
+// pullCommand returns an AWS CLI command that re-fetches the raw resource a
+// kingfisher hit came from, so an analyst can pull the full object by hand.
+// Returns "" for source types we can't reconstruct a command for.
+func pullCommand(sourceType, region string, meta map[string]string) string {
+	r := ""
+	if region != "" && region != "global" {
+		r = " --region " + region
+	}
+	switch sourceType {
+	case "ecs_taskdef":
+		return "aws ecs describe-task-definition --task-definition " + meta["arn"] + r
+	case "lambda_env":
+		return "aws lambda get-function-configuration --function-name " + meta["function"] + r
+	case "lambda_code":
+		return "aws lambda get-function --function-name " + meta["function"] + " --query Code.Location --output text" + r + "   # then curl the returned URL"
+	case "ssm_param":
+		return "aws ssm get-parameter --name '" + meta["name"] + "' --with-decryption" + r
+	case "ssm_output":
+		return "aws ssm list-command-invocations --command-id " + meta["command_id"] + " --details" + r
+	case "cfn_params":
+		return "aws cloudformation describe-stacks --stack-name " + meta["stack"] + r
+	case "cfn_template":
+		return "aws cloudformation get-template --stack-name " + meta["stack"] + " --query TemplateBody" + r
+	case "codebuild":
+		return "aws codebuild batch-get-projects --names " + meta["project"] + r
+	case "ec2_userdata":
+		return "aws ec2 describe-instance-attribute --instance-id " + meta["instance_id"] + " --attribute userData --query UserData.Value --output text" + r + " | base64 -d"
+	case "s3":
+		return "aws s3api get-object --bucket " + meta["bucket"] + " --key '" + meta["key"] + "' /dev/stdout" + r
+	case "stepfn":
+		return "aws stepfunctions describe-state-machine --state-machine-arn " + meta["arn"] + r
+	case "cwlogs":
+		cmd := "aws logs get-log-events --log-group-name '" + meta["group"] + "'"
+		if s := meta["stream"]; s != "" {
+			cmd += " --log-stream-name '" + s + "'"
+		}
+		return cmd + r
+	case "iam_keys":
+		return "aws iam list-access-keys --user-name " + meta["user"]
+	case "glue_job":
+		return "aws glue get-job --job-name " + meta["name"] + r
+	case "glue_conn":
+		return "aws glue get-connection --name " + meta["name"] + r
+	case "codepipeline":
+		return "aws codepipeline get-pipeline --name " + meta["name"] + r
+	case "beanstalk":
+		return "aws elasticbeanstalk describe-configuration-settings --application-name " + meta["app"] + " --environment-name " + meta["env"] + r
+	case "apprunner":
+		return "aws apprunner describe-service --service-arn " + meta["arn"] + r
+	case "redshift_params":
+		return "aws redshift describe-cluster-parameters --parameter-group-name " + meta["parameter_group"] + r
+	case "sagemaker_lc":
+		return "aws sagemaker describe-notebook-instance-lifecycle-config --notebook-instance-lifecycle-config-name " + meta["name"] + r
+	case "apigw_vars":
+		return "aws apigateway get-stage --rest-api-id " + afterLast(meta["arn"], "/") + " --stage-name " + meta["stage"] + r
+	case "emr":
+		return "aws emr list-bootstrap-actions --cluster-id " + afterLast(meta["arn"], "/") + r
+	case "amplify":
+		return "aws amplify get-app --app-id " + afterLast(meta["arn"], "/") + r
+	case "appsync":
+		return "aws appsync list-graphql-apis" + r + "   # api '" + meta["api"] + "'"
+	}
+	return ""
 }
 
 func redactMatch(s string) string {

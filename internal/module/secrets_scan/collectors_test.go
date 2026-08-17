@@ -7,6 +7,30 @@ import (
 	"testing"
 )
 
+func TestPullCommand(t *testing.T) {
+	tdArn := "arn:aws:ecs:us-east-1:111122223333:task-definition/web:5"
+	got := pullCommand("ecs_taskdef", "us-east-1", map[string]string{"arn": tdArn, "family": "web"})
+	want := "aws ecs describe-task-definition --task-definition " + tdArn + " --region us-east-1"
+	if got != want {
+		t.Errorf("ecs_taskdef:\n got %q\nwant %q", got, want)
+	}
+
+	// Global resources (iam) omit --region.
+	if c := pullCommand("iam_keys", "global", map[string]string{"user": "svc"}); c != "aws iam list-access-keys --user-name svc" {
+		t.Errorf("iam_keys global: %q", c)
+	}
+
+	// ID parsed out of the ARN for services keyed by opaque id.
+	if c := pullCommand("apigw_vars", "eu-west-1", map[string]string{"arn": "arn:aws:apigateway:eu-west-1::/restapis/abc123", "stage": "prod"}); c != "aws apigateway get-stage --rest-api-id abc123 --stage-name prod --region eu-west-1" {
+		t.Errorf("apigw_vars: %q", c)
+	}
+
+	// Unknown source type → no command.
+	if c := pullCommand("mystery", "us-east-1", nil); c != "" {
+		t.Errorf("unknown source should give empty command, got %q", c)
+	}
+}
+
 func TestSanitizeSourcePath(t *testing.T) {
 	cases := map[string]string{
 		"s3/my-bucket/path/to/key.env": filepath.Join("s3", "my-bucket", "path", "to", "key.env"),
