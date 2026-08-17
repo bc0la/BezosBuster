@@ -2,8 +2,30 @@ package secrets_scan
 
 import (
 	"context"
+	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestSanitizeSourcePath(t *testing.T) {
+	cases := map[string]string{
+		"s3/my-bucket/path/to/key.env": filepath.Join("s3", "my-bucket", "path", "to", "key.env"),
+		"lambda_env/my-func":           filepath.Join("lambda_env", "my-func"),
+		"ssm_param/App:Secret":         filepath.Join("ssm_param", "App_Secret"),
+		// Traversal attempts must be neutralised — no "..", no escape.
+		"s3/../../etc/passwd": filepath.Join("s3", "etc", "passwd"),
+		"/leading//double/":   filepath.Join("leading", "double"),
+	}
+	for in, want := range cases {
+		got := sanitizeSourcePath(in)
+		if got != want {
+			t.Errorf("sanitizeSourcePath(%q) = %q, want %q", in, got, want)
+		}
+		if strings.Contains(got, "..") {
+			t.Errorf("sanitizeSourcePath(%q) leaked a traversal segment: %q", in, got)
+		}
+	}
+}
 
 func TestS3MaxPages(t *testing.T) {
 	// Unset context → default cap.

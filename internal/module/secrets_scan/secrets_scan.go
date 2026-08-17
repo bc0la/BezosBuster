@@ -290,7 +290,7 @@ func scanSamples(ctx context.Context, kfPath string, samples []sample, t creds.A
 	}
 
 	kfFindings := runKingfisher(ctx, kfPath, tmpDir, "non_s3", t, sink)
-	emitFindings(kfFindings, fileMap, t, sink, ctx.Value("bb.redact_secrets") == nil)
+	emitFindings(kfFindings, fileMap, tmpDir, t, sink, ctx.Value("bb.redact_secrets") == nil)
 }
 
 // saveRawOutput writes kingfisher's raw output to
@@ -370,9 +370,10 @@ func runKingfisher(ctx context.Context, kfPath, dir, phase string, t creds.Accou
 
 // emitFindings writes one report finding per kingfisher hit. unredact defaults
 // to true: the full secret value is stored so it's usable straight from the
-// report UI. Pass --redact-secrets to keep only a short redacted preview
-// (match = first/last few chars) in the engagement DB instead.
-func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.AccountTarget, sink findings.Sink, unredact bool) {
+// report UI, and the file that hit is copied into the engagement dir (see
+// saveHitFile) with the finding's RawOutputPath pointing at it. Pass
+// --redact-secrets to keep only a short redacted preview and skip saving files.
+func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, tmpDir string, t creds.AccountTarget, sink findings.Sink, unredact bool) {
 	ctx := context.Background()
 	for _, f := range kfFindings {
 		fname := filepath.Base(f.Finding.Path)
@@ -423,16 +424,72 @@ func emitFindings(kfFindings []kfFinding, fileMap map[string]*sample, t creds.Ac
 			detail[k] = v
 		}
 
+		// Persist the file that hit (unless redacting) so the report can link
+		// straight to the offending content. RawOutputPath points at the
+		// containing folder — the report's /raw/ browser appends a trailing
+		// slash and lists it.
+		var rawOut string
+		if unredact {
+			if saved := saveHitFile(filepath.Join(tmpDir, fname), s.Source, t, sink); saved != "" {
+				detail["saved_file"] = saved
+				rawOut = filepath.Dir(saved)
+			}
+		}
+
 		_ = sink.Write(ctx, findings.Finding{
-			AccountID:   t.AccountID,
-			Region:      region,
-			Module:      "secrets_scan",
-			Severity:    sev,
-			ResourceARN: s.Metadata["arn"],
-			Title:       title,
-			Detail:      detail,
+			AccountID:     t.AccountID,
+			Region:        region,
+			Module:        "secrets_scan",
+			Severity:      sev,
+			ResourceARN:   s.Metadata["arn"],
+			Title:         title,
+			Detail:        detail,
+			RawOutputPath: rawOut,
 		})
 	}
+}
+
+// saveHitFile copies a file kingfisher flagged into a browsable location under
+// the engagement dir: <engagement>/secrets_scan/<account>/hits/<source>, where
+// <source> is the sample Source (e.g. "s3/bucket/key") preserved as a nested
+// path. Returns the destination path, or "" on any failure (best-effort).
+func saveHitFile(srcPath, source string, t creds.AccountTarget, sink findings.Sink) string {
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return ""
+	}
+	rawDir, err := sink.RawDir("secrets_scan", t.AccountID)
+	if err != nil {
+		return ""
+	}
+	rel := sanitizeSourcePath(source)
+	if rel == "" {
+		return ""
+	}
+	dest := filepath.Join(rawDir, "hits", rel)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return ""
+	}
+	if err := os.WriteFile(dest, data, 0o600); err != nil {
+		return ""
+	}
+	return dest
+}
+
+// sanitizeSourcePath turns a sample Source into a safe relative path, keeping
+// "/" as directory separators but dropping empty/"."/".." segments (no
+// traversal) and neutralising ":" / "\".
+func sanitizeSourcePath(source string) string {
+	repl := strings.NewReplacer(":", "_", "\\", "_")
+	var clean []string
+	for _, p := range strings.Split(source, "/") {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "." || p == ".." {
+			continue
+		}
+		clean = append(clean, repl.Replace(p))
+	}
+	return filepath.Join(clean...)
 }
 
 func redactMatch(s string) string {

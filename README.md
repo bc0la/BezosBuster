@@ -215,9 +215,12 @@ every folder in a large bucket is reached, pair it with `--s3-max-pages 0`.
 
 **Secret values are stored unredacted by default** — the full match is written
 to the engagement DB and shown in the report UI (`detail.match`), so you can use
-a found credential straight away. This means `engagement.db` contains live
-secrets in plaintext; treat the engagement dir as sensitive. To keep only a
-short preview (`AKIA12…3456`) instead:
+a found credential straight away. Additionally, **each file kingfisher hits on is
+saved** under the engagement dir at
+`secrets_scan/<account>/hits/<source>` (e.g. `hits/s3/my-bucket/path/key.env`),
+and the finding links to it via the report's `raw → browse`. This means the
+engagement dir contains live secrets in plaintext; treat it as sensitive. To
+keep only a short preview (`AKIA12…3456`) and skip saving files:
 
 ```bash
 bezosbuster scan --profile dev --redact-secrets
